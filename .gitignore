@@ -1,0 +1,14 @@
+# Local test artifacts — binaries should only come from CI
+*.tar.gz
+v*/nullwire-cli-*
+v*/nullwire-ui-*
+v*/checksums.sha256
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
