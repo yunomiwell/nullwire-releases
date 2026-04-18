@@ -59,7 +59,7 @@ jobs:
       - name: Checkout private source
         uses: actions/checkout@v4
         with:
-          repository: yunomiwell/nullwire
+          repository: yunomiwell/nullwire-core
           ssh-key: ${{ secrets.PRIVATE_SOURCE_DEPLOY_KEY }}
           ref: ${{ github.ref_name }}    # match the tag pushed to releases repo
           path: source
@@ -150,7 +150,7 @@ jobs:
       - name: Checkout private source
         uses: actions/checkout@v4
         with:
-          repository: yunomiwell/nullwire
+          repository: yunomiwell/nullwire-core
           ssh-key: ${{ secrets.PRIVATE_SOURCE_DEPLOY_KEY }}
           ref: ${{ github.ref_name }}
           path: source
