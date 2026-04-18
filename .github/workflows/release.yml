@@ -31,6 +31,11 @@ on:
 permissions:
   contents: write   # needed to create the GitHub Release
 
+# Silence the Node 20 deprecation warnings from GitHub-provided actions.
+# GitHub will flip this to the default on 2026-06-02; this just opts in early.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -42,8 +47,12 @@ jobs:
           - target: macos-arm64
             runner: macos-14
             rust_target: aarch64-apple-darwin
+          # macOS x86_64: cross-compile from an arm64 runner because macos-13
+          # (Intel) runners were retired by GitHub.  Xcode's SDK on Apple Silicon
+          # macOS runners supports x86_64 universally, so `cargo build --target
+          # x86_64-apple-darwin` works natively.
           - target: macos-x86_64
-            runner: macos-13
+            runner: macos-14
             rust_target: x86_64-apple-darwin
           - target: linux-x86_64
             runner: ubuntu-latest
