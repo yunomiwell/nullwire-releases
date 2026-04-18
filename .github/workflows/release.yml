@@ -48,9 +48,9 @@ jobs:
           - target: linux-x86_64
             runner: ubuntu-latest
             rust_target: x86_64-unknown-linux-gnu
-          - target: linux-arm64
-            runner: ubuntu-latest
-            rust_target: aarch64-unknown-linux-gnu
+          # linux-arm64 dropped for v0.1.0 — openssl-sys cross-compile needs
+          # either a sysroot or vendored openssl.  Add back via `cross` tool
+          # in a follow-up release once the main pipeline is proven.
 
     steps:
       - name: Checkout releases repo (this one)
@@ -68,17 +68,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
-
-      - name: Install Linux ARM64 cross-compiler
-        if: matrix.target == 'linux-arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml <<EOF
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
 
       - name: Build CLI
         working-directory: source/phase0
@@ -159,6 +148,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Install UI dependencies
+        working-directory: source/nullwire_messenger
+        run: npm ci
 
       - name: Build messenger UI bundle
         working-directory: source/nullwire_messenger
