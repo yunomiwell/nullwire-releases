@@ -113,8 +113,15 @@ jobs:
             --sign "$APPLE_DEVELOPER_ID" \
             source/phase0/target/${{ matrix.rust_target }}/release/nullwire-cli
 
-      - name: Notarize (macOS, only if notarization secrets present)
+      # Notarization is best-effort. If Apple's queue is slow or a new Team ID
+      # hits first-submission backlog, we don't want the whole release blocked.
+      # The binary is still validly codesigned; Gatekeeper shows a warning
+      # on first run but right-click→Open bypasses it. Once notarize works
+      # reliably for this Team ID we can tighten this back to required.
+      - name: Notarize (macOS, best-effort, non-blocking)
         if: startsWith(matrix.target, 'macos') && env.APPLE_NOTARIZE_USER != ''
+        continue-on-error: true
+        timeout-minutes: 15
         env:
           APPLE_NOTARIZE_USER: ${{ secrets.APPLE_NOTARIZE_USER }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
@@ -127,6 +134,7 @@ jobs:
             --apple-id "$APPLE_NOTARIZE_USER" \
             --password "$APPLE_NOTARIZE_PASSWORD" \
             --team-id "$APPLE_NOTARIZE_TEAM_ID" \
+            --timeout 12m \
             --wait
 
       - name: Rename binary for upload
