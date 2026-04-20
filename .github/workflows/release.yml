@@ -91,27 +91,27 @@ jobs:
         if: startsWith(matrix.target, 'macos')
         run: strip source/phase0/target/${{ matrix.rust_target }}/release/nullwire-cli
 
-      - name: Codesign (macOS, only if cert secret present)
-        if: startsWith(matrix.target, 'macos') && env.APPLE_CERT_P12_BASE64 != ''
-        env:
-          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+      # AD-HOC SIGNING (sign with `-` identity, no Developer ID involved).
+      #
+      # Why ad-hoc instead of Developer ID right now: Apple has marked our
+      # team (2BVDP7296P) as revoked in the notary database (Apple support
+      # case 102873775642 pending). Any binary signed with our Developer ID
+      # gets killed by AMFI on macOS launch ("Malware Blocked and Moved to
+      # Trash"). Ad-hoc signing satisfies AMFI's signature requirement on
+      # Apple Silicon without invoking the Apple notary system at all.
+      #
+      # Trade-off: Gatekeeper shows "unidentified developer" on browser-
+      # downloaded binaries (right-click→Open bypasses). curl|bash install
+      # path is unaffected. This is the same UX as 95% of indie macOS tools.
+      #
+      # Restore Developer ID signing for v0.1.1 once Apple unblocks the team.
+      - name: Codesign (ad-hoc, until Apple unblocks team config)
+        if: startsWith(matrix.target, 'macos')
         run: |
-          # Decode and import certificate into a temporary keychain
-          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-          echo "$APPLE_CERT_P12_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
-          security import $RUNNER_TEMP/cert.p12 -k "$KEYCHAIN_PATH" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          codesign --force --deep --options runtime --timestamp \
-            --sign "$APPLE_DEVELOPER_ID" \
-            source/phase0/target/${{ matrix.rust_target }}/release/nullwire-cli
+          BIN=source/phase0/target/${{ matrix.rust_target }}/release/nullwire-cli
+          codesign --force --sign - "$BIN"
+          echo "=== verify ad-hoc signature ==="
+          codesign -dv --verbose=2 "$BIN" 2>&1 | head -8
 
       # Notarization DISABLED until Apple Developer Programs Support configures
       # Team 2BVDP7296P for notarization. Apple's notary returns status 7000
