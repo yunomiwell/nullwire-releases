@@ -113,15 +113,16 @@ jobs:
             --sign "$APPLE_DEVELOPER_ID" \
             source/phase0/target/${{ matrix.rust_target }}/release/nullwire-cli
 
-      # Notarization is best-effort. If Apple's queue is slow or a new Team ID
-      # hits first-submission backlog, we don't want the whole release blocked.
-      # The binary is still validly codesigned; Gatekeeper shows a warning
-      # on first run but right-click→Open bypasses it. Once notarize works
-      # reliably for this Team ID we can tighten this back to required.
-      - name: Notarize (macOS, best-effort, non-blocking)
-        if: startsWith(matrix.target, 'macos') && env.APPLE_NOTARIZE_USER != ''
-        continue-on-error: true
-        timeout-minutes: 15
+      # Notarization DISABLED until Apple Developer Programs Support configures
+      # Team 2BVDP7296P for notarization. Apple's notary returns status 7000
+      # ("Team is not yet configured for notarization") for every submission.
+      # While disabled, binaries ship codesigned-only — Gatekeeper shows
+      # "unnotarized Developer ID" (right-click→Open bypasses) instead of
+      # the scarier "revoked" verdict that comes from a rejected notary DB
+      # entry. Re-enable this step once Apple support resolves the team
+      # configuration; track via support case 102873775642.
+      - name: Notarize (macOS, DISABLED — Apple team not yet configured)
+        if: false
         env:
           APPLE_NOTARIZE_USER: ${{ secrets.APPLE_NOTARIZE_USER }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
