@@ -192,11 +192,22 @@ main() {
     log "installing nullwire-cli to $NULLWIRE_HOME/bin..."
     mv "$tmp_dir/$cli_asset" "$NULLWIRE_HOME/bin/nullwire-cli"
     chmod +x "$NULLWIRE_HOME/bin/nullwire-cli"
+    # Defensive: strip macOS quarantine attribute if present (only matters
+    # if the user obtained the binary via browser before piping; curl-fetched
+    # files don't have it). Silent no-op on Linux + when xattr absent.
+    if command -v xattr >/dev/null 2>&1; then
+        xattr -d com.apple.quarantine "$NULLWIRE_HOME/bin/nullwire-cli" 2>/dev/null || true
+    fi
     ok "installed nullwire-cli $NULLWIRE_VERSION"
 
-    # Extract UI
+    # Extract UI. The tarball has flat members (index.html, app.js,
+    # server.mjs, profiles/*) with no parent directory, so we do NOT
+    # pass --strip-components. Using it here would strip the only path
+    # component and silently drop every top-level file — which is what
+    # v0.1.0 shipped with and caused a "Cannot find module server.mjs"
+    # error on fresh installs.
     log "extracting messenger UI..."
-    tar -xzf "$tmp_dir/$ui_asset" -C "$NULLWIRE_HOME/ui" --strip-components=1
+    tar -xzf "$tmp_dir/$ui_asset" -C "$NULLWIRE_HOME/ui"
     ok "installed messenger UI"
 
     # Run initial setup (creates identity + prekey bundle)
