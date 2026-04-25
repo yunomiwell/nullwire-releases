@@ -86,6 +86,12 @@ detect_platform() {
         *)             fail "unsupported arch: $arch (currently supports: x86_64, arm64)" ;;
     esac
 
+    # v0.1.0 ships 3 platforms only: macos-arm64, macos-x86_64, linux-x86_64.
+    # Linux ARM64 is on the roadmap but not built yet — fail clearly instead of 404ing.
+    if [ "$os" = "linux" ] && [ "$arch" = "arm64" ]; then
+        fail "linux/arm64 is not yet built. v0.1.0 ships macos-arm64, macos-x86_64, linux-x86_64. follow https://nullwire.xyz/status for arm64-linux progress."
+    fi
+
     echo "${os}-${arch}"
 }
 
@@ -101,7 +107,9 @@ check_deps() {
     require_cmd shasum
     require_cmd uname
 
-    # Node.js is required in Phase B-1 for the server; Phase B-2 will eliminate this.
+    # Node.js is required to run the messenger UI server (server.mjs) shipped with v0.1.0.
+    # The Rust nullwire-server is now primary for the data plane (send/poll); the Node
+    # process is kept as the messenger UI shell. Future release will collapse to one binary.
     if ! command -v node >/dev/null 2>&1; then
         warn "node is not installed — it's required to run the messenger UI server."
         if [ "$(uname -s)" = "Darwin" ]; then
