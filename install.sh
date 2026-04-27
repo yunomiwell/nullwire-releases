@@ -32,7 +32,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.2}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc1}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
