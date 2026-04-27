@@ -185,10 +185,17 @@ jobs:
           npm run build
 
       - name: Create tarball
+        # Include `src/` so server.mjs's runtime import of
+        # `./src/pair-server.mjs` resolves. The pair-server module
+        # provides the WebRTC contact-pairing /pair/* broker; without
+        # it the messenger fails to boot with `ERR_MODULE_NOT_FOUND`
+        # on first run. v0.1.1 release shipped without `src/` and
+        # broke fresh installs — caught by post-release Phase 5
+        # smoke test on a clean ts-mac. v0.1.2 fixes.
         run: |
           cd source/nullwire_messenger
           tar -czf $GITHUB_WORKSPACE/nullwire-ui-${{ github.ref_name }}.tar.gz \
-            index.html app.js server.mjs profiles/
+            index.html app.js server.mjs profiles/ src/
 
       - name: Upload UI artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
