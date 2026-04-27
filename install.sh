@@ -107,18 +107,10 @@ check_deps() {
     require_cmd shasum
     require_cmd uname
 
-    # Node.js is required to run the messenger UI server (server.mjs) shipped with v0.1.0.
-    # The Rust nullwire-server is now primary for the data plane (send/poll); the Node
-    # process is kept as the messenger UI shell. Future release will collapse to one binary.
-    if ! command -v node >/dev/null 2>&1; then
-        warn "node is not installed — it's required to run the messenger UI server."
-        if [ "$(uname -s)" = "Darwin" ]; then
-            warn "install with: brew install node"
-        else
-            warn "install via your package manager, e.g. apt install nodejs"
-        fi
-        fail "please install node and re-run this script."
-    fi
+    # v0.1.3+: messenger is a single Rust binary with the UI bundled via
+    # include_dir!. No Node.js, no separate UI tarball, no extraction step.
+    # The binary either runs (and serves the UI it was compiled with) or
+    # it doesn't — eliminating the v0.1.1 "missing src/" install bug class.
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -165,10 +157,10 @@ main() {
     chmod 700 "$NULLWIRE_HOME"              # only current user can read
     chmod 700 "$NULLWIRE_HOME/state"        # extra protection for crypto material
 
-    # Determine download URLs
+    # Determine download URLs.  v0.1.3+: single binary per platform,
+    # UI bundled via include_dir!. No more separate UI tarball.
     local base_url="${NULLWIRE_RELEASES_BASE}/${NULLWIRE_VERSION}"
     local cli_asset="nullwire-cli-${platform}"
-    local ui_asset="nullwire-ui-${NULLWIRE_VERSION}.tar.gz"
     local checksums_url="${base_url}/checksums.sha256"
 
     # Fetch checksums manifest first — it's small, signed, and drives verification
@@ -178,23 +170,18 @@ main() {
 
     download "$checksums_url" "$tmp_dir/checksums.sha256"
 
-    # Extract expected hashes
-    local cli_hash ui_hash
+    # Extract expected hash for the CLI binary.
+    local cli_hash
     cli_hash="$(grep " $cli_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}')"
-    ui_hash="$(grep " $ui_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}')"
 
-    if [ -z "$cli_hash" ] || [ -z "$ui_hash" ]; then
+    if [ -z "$cli_hash" ]; then
         fail "could not find expected checksum entries for platform $platform
     This version of the installer may not match the release."
     fi
 
-    # Download CLI binary
+    # Download CLI binary (UI bundled inside).
     download "$base_url/$cli_asset" "$tmp_dir/$cli_asset"
     verify_sha256 "$tmp_dir/$cli_asset" "$cli_hash"
-
-    # Download UI bundle
-    download "$base_url/$ui_asset" "$tmp_dir/$ui_asset"
-    verify_sha256 "$tmp_dir/$ui_asset" "$ui_hash"
 
     # Install CLI
     log "installing nullwire-cli to $NULLWIRE_HOME/bin..."
@@ -208,21 +195,15 @@ main() {
     fi
     ok "installed nullwire-cli $NULLWIRE_VERSION"
 
-    # Extract UI. The tarball has flat members (index.html, app.js,
-    # server.mjs, profiles/*) with no parent directory, so we do NOT
-    # pass --strip-components. Using it here would strip the only path
-    # component and silently drop every top-level file — which is what
-    # v0.1.0 shipped with and caused a "Cannot find module server.mjs"
-    # error on fresh installs.
-    log "extracting messenger UI..."
-    tar -xzf "$tmp_dir/$ui_asset" -C "$NULLWIRE_HOME/ui"
-    ok "installed messenger UI"
-
     # Run initial setup (creates identity + prekey bundle)
     log "initializing your identity..."
     if [ -f "$NULLWIRE_HOME/state/identity.json" ]; then
         ok "existing identity found — skipping setup"
     else
+        # `--ui-dir` is vestigial in v0.1.3+ (UI is bundled into the
+        # binary via include_dir!) but `nullwire-cli setup` still
+        # requires it.  Pass it for compat — the directory gets
+        # created but stays empty.
         "$NULLWIRE_HOME/bin/nullwire-cli" setup \
             --state-dir "$NULLWIRE_HOME/state" \
             --ui-dir "$NULLWIRE_HOME/ui" \
@@ -230,13 +211,12 @@ main() {
         ok "identity created"
     fi
 
-    # Start the messenger server
+    # Start the messenger server (Rust, single binary, UI embedded).
     log "starting messenger on http://127.0.0.1:${NULLWIRE_PORT}..."
-    cd "$NULLWIRE_HOME/ui"
-    NULLWIRE_CONFIG_PATH="$NULLWIRE_HOME/config.json" \
-    NULLWIRE_STATE_DIR="$NULLWIRE_HOME/state" \
-    PORT="$NULLWIRE_PORT" \
-        node server.mjs &
+    "$NULLWIRE_HOME/bin/nullwire-cli" server \
+        --home "$NULLWIRE_HOME" \
+        --port "$NULLWIRE_PORT" \
+        --bind 127.0.0.1 &
     local server_pid=$!
 
     # Wait briefly for server to be ready

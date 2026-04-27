@@ -73,12 +73,29 @@ jobs:
           ref: ${{ github.ref_name }}    # match the tag pushed to releases repo
           path: source
 
+      - name: Install Node (for UI bundle, embedded into the Rust binary)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '20'
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable, audit-pinned 2026-04-25
         with:
           targets: ${{ matrix.rust_target }}
 
-      - name: Build CLI
+      - name: Build messenger UI bundle (esbuild → nullwire_messenger/dist/)
+        # The Rust nullwire-server crate uses `include_dir!` to embed
+        # `nullwire_messenger/dist/{index.html,app.js}` into the binary.
+        # `npm run dist` runs the audited esbuild flags (--platform=browser
+        # --external:node:* --minify) and copies the static assets into
+        # dist/. Regenerating in CI guarantees the bundle matches source.
+        working-directory: source/nullwire_messenger
+        run: |
+          npm ci --ignore-scripts
+          npm run dist
+          ls -la dist/
+
+      - name: Build CLI (single binary; UI embedded via include_dir!)
         working-directory: source/phase0
         run: |
           cargo build --release --target ${{ matrix.rust_target }} -p nullwire-cli
@@ -150,63 +167,14 @@ jobs:
           path: nullwire-cli-${{ matrix.target }}
           retention-days: 1
 
-  bundle-ui:
-    name: Bundle messenger UI
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout private source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.2.2
-        with:
-          repository: yunomiwell/nullwire-core
-          ssh-key: ${{ secrets.PRIVATE_SOURCE_DEPLOY_KEY }}
-          ref: ${{ github.ref_name }}
-          path: source
-
-      - name: Install Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
-        with:
-          node-version: '20'
-
-      - name: Install UI dependencies
-        working-directory: source/nullwire_messenger
-        run: npm ci --ignore-scripts
-
-      - name: Build messenger UI bundle
-        working-directory: source/nullwire_messenger
-        # Use the package.json `build` script so the bundle flags stay
-        # in ONE place. The previous raw `esbuild ... --format=esm` here
-        # diverged from what the source tree expects: it lacked
-        # `--platform=browser` + `--external:node:*` + `--minify`, so any
-        # browser-only source that uses `await import('node:*')` for
-        # node-only fallback paths (e.g. src/deep-link.mjs zlib for QR
-        # fountain codes) failed bundling. v0.1.1 release-build broke
-        # exactly here. Source-of-truth for bundle flags is package.json.
-        run: |
-          npm run build
-
-      - name: Create tarball
-        # Include `src/` so server.mjs's runtime import of
-        # `./src/pair-server.mjs` resolves. The pair-server module
-        # provides the WebRTC contact-pairing /pair/* broker; without
-        # it the messenger fails to boot with `ERR_MODULE_NOT_FOUND`
-        # on first run. v0.1.1 release shipped without `src/` and
-        # broke fresh installs — caught by post-release Phase 5
-        # smoke test on a clean ts-mac. v0.1.2 fixes.
-        run: |
-          cd source/nullwire_messenger
-          tar -czf $GITHUB_WORKSPACE/nullwire-ui-${{ github.ref_name }}.tar.gz \
-            index.html app.js server.mjs profiles/ src/
-
-      - name: Upload UI artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: nullwire-ui-bundle
-          path: nullwire-ui-${{ github.ref_name }}.tar.gz
-          retention-days: 1
+  # bundle-ui job removed in v0.1.3: the messenger UI is now embedded
+  # into the Rust binary via include_dir!, so there is no separate UI
+  # tarball to ship.  npm run dist now happens inside the per-platform
+  # `build` job above so each Rust binary embeds the matching UI bundle.
 
   release:
     name: Publish release
-    needs: [build, bundle-ui]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout releases repo
