@@ -173,8 +173,16 @@ jobs:
 
       - name: Build messenger UI bundle
         working-directory: source/nullwire_messenger
+        # Use the package.json `build` script so the bundle flags stay
+        # in ONE place. The previous raw `esbuild ... --format=esm` here
+        # diverged from what the source tree expects: it lacked
+        # `--platform=browser` + `--external:node:*` + `--minify`, so any
+        # browser-only source that uses `await import('node:*')` for
+        # node-only fallback paths (e.g. src/deep-link.mjs zlib for QR
+        # fountain codes) failed bundling. v0.1.1 release-build broke
+        # exactly here. Source-of-truth for bundle flags is package.json.
         run: |
-          npx esbuild app.jsx --bundle --outfile=app.js --format=esm --jsx=automatic
+          npm run build
 
       - name: Create tarball
         run: |
