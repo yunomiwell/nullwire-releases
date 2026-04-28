@@ -32,10 +32,49 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc4}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc5}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
+
+# ─────────────────────────────────────────────────────────────────
+# PILOT-PAYER (rc4 v5 split-payer)
+# ─────────────────────────────────────────────────────────────────
+#
+# Solana program v5 (deployed 2026-04-28, slot 458720281) splits the
+# rent-payer account from the identity-owner account in the user-handle
+# register instruction.  Pre-v5 these were the same account, and a
+# shared install-time keypair would let anyone with that key rotate
+# every tester's bundle.  Post-v5 the embedded keypair below ONLY pays
+# rent — the identity-owner is the user's local ed25519 signing key
+# (stored in `state.json`, never leaves the device).
+#
+# Why we embed it:
+#   - The Solana devnet faucet rate-limits hard.  Without a pre-funded
+#     payer, every fresh `curl install.sh | bash` hits the faucet, fails,
+#     and forces a manual `solana transfer` recovery — unworkable for a
+#     100-tester pilot.
+#   - With the embedded payer, register-self uses the existing balance
+#     and the airdrop call is skipped.
+#
+# Compromise model:
+#   - This keypair is PUBLIC by design (it's literally in this script,
+#     served from a CDN).
+#   - Worst case: someone drains the wallet → next install can't
+#     register until we top up the wallet.  Cost: a few SOL of devnet
+#     funds, no security impact.  Bundle uploads cannot be forged
+#     because the upload-bundle Edge Function verifies the signature
+#     against the on-chain owner_pubkey, which is the user's identity,
+#     NOT this payer.
+#   - Devnet only.  Mainnet (post-v1.0) will use a different model.
+#
+# Refresh: regenerate locally with
+#   solana-keygen new -o phase0/devnet-pilot-payer.json --no-bip39-passphrase --force
+#   solana transfer <new-pubkey> 5 --keypair phase0/devnet-deployer.json --url devnet
+#   base64 -i phase0/devnet-pilot-payer.json | tr -d '\n'
+# and replace the constant below.
+readonly NULLWIRE_PILOT_PAYER_PUBKEY="He8V5kgZszVXtjtxcq8CLaQ9GUfAK4dXvwgxcQyxqazA"
+readonly NULLWIRE_PILOT_PAYER_KEYPAIR_B64="WzIyMCwxMTgsMjUxLDI0NiwyNywyMzUsNzUsMjE2LDc4LDIxMywyNywxNzgsMTg2LDIxMCw3Niw3LDgxLDE5LDY3LDIxNSwxMTIsNDksMTU5LDg4LDcwLDk3LDE0Myw4MiwxMDQsMjE5LDYxLDEwNCwyNDcsNjEsMjQxLDExMywxMTIsNDksMTI4LDE1NSw3LDExMywyMDUsMjQzLDE2NSwyNDQsMTYsMTAxLDE5NSwyMDMsNzAsMjM3LDQ2LDU4LDIwMCwxNDQsMTY4LDE0MSwxMDMsMTE0LDIxMiwyMjAsMTIzLDE5OV0="
 
 # ─────────────────────────────────────────────────────────────────
 # COLORS — only if stdout is a terminal
@@ -156,6 +195,32 @@ main() {
     mkdir -p "$NULLWIRE_HOME"/{bin,state,ui}
     chmod 700 "$NULLWIRE_HOME"              # only current user can read
     chmod 700 "$NULLWIRE_HOME/state"        # extra protection for crypto material
+
+    # ─────────────────────────────────────────────────────────────
+    # rc4 v5 split-payer: stage the pilot rent-payer keypair
+    # ─────────────────────────────────────────────────────────────
+    #
+    # Decode the embedded base64 keypair (see CONFIG block above) into
+    # `<state-dir>/service-fee.json` ONLY if the file doesn't already
+    # exist.  `nullwire-cli setup --auto-register` reuses this file and
+    # skips the airdrop step (its `ensure_service_fee_wallet` short-
+    # circuits when the wallet has any balance ≥ 0.01 SOL).
+    #
+    # Permissions: 0600 — same posture as state.json.  This is harmless
+    # on devnet (the keypair is in this public script anyway) but
+    # follows the convention so a future rotation to per-install
+    # keypairs doesn't leave a 0644 file lying around.
+    local fee_keypair_path="$NULLWIRE_HOME/state/service-fee.json"
+    if [ ! -f "$fee_keypair_path" ]; then
+        log "staging pilot rent-payer keypair (v5 payer-only, owner remains local)..."
+        if printf '%s' "$NULLWIRE_PILOT_PAYER_KEYPAIR_B64" | base64 -d > "$fee_keypair_path" 2>/dev/null; then
+            chmod 600 "$fee_keypair_path"
+            ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY)"
+        else
+            warn "could not decode pilot rent-payer; falling back to per-install airdrop"
+            rm -f "$fee_keypair_path"
+        fi
+    fi
 
     # Determine download URLs.  v0.1.3+: single binary per platform,
     # UI bundled via include_dir!. No more separate UI tarball.
