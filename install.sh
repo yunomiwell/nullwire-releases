@@ -220,10 +220,16 @@ main() {
     # follows the convention so a future rotation to per-install
     # keypairs doesn't leave a 0644 file lying around.
 
-    # 0.1 SOL = 100_000_000 lamports. Covers ~35 fresh registrations
-    # (~0.0028 SOL each). Enough headroom that a tester finishing the
-    # install before our top-up cron fires won't be blocked.
-    local MIN_PILOT_PAYER_LAMPORTS=100000000
+    # 0.5 SOL = 500_000_000 lamports.
+    #
+    # R7-02 (rc6 follow-up): raised from 0.1 SOL → 0.5 SOL because a
+    # launch-day burst of >35 concurrent installs would all read a
+    # stale-but-above-threshold balance, stage the keypair, then
+    # collide on-chain when the wallet drained mid-burst — and the
+    # CLI's per-pubkey airdrop fallback rate-limits at the faucet.
+    # 0.5 SOL covers ~175 concurrent registrations of headroom, a
+    # comfortable margin for the 100-tester pilot.
+    local MIN_PILOT_PAYER_LAMPORTS=500000000
     local fee_keypair_path="$NULLWIRE_HOME/state/service-fee.json"
 
     # 5-second cap on the RPC; a slow Solana endpoint must not block
@@ -240,28 +246,45 @@ main() {
         printf '%s' "$resp" | grep -oE '"value":[0-9]+' | head -1 | sed 's/.*://'
     }
 
-    if [ ! -f "$fee_keypair_path" ]; then
-        log "checking pilot rent-payer balance (devnet)..."
-        local payer_balance
-        payer_balance="$(pilot_payer_balance_lamports || true)"
-        if [ -n "$payer_balance" ] && [ "$payer_balance" -lt "$MIN_PILOT_PAYER_LAMPORTS" ] 2>/dev/null; then
-            warn "pilot rent-payer is low (${payer_balance} lamports < ${MIN_PILOT_PAYER_LAMPORTS}); falling back to per-install devnet airdrop."
-            warn "if registration fails with rate-limit, retry in a few minutes — funds are being topped up."
-            # Skip embedded-keypair staging; nullwire-cli will request
-            # an airdrop on its own keypair via ensure_service_fee_wallet.
-        else
-            log "staging pilot rent-payer keypair (v5 payer-only, owner remains local)..."
-            if printf '%s' "$NULLWIRE_PILOT_PAYER_KEYPAIR_B64" | base64 -d > "$fee_keypair_path" 2>/dev/null; then
-                chmod 600 "$fee_keypair_path"
-                if [ -n "$payer_balance" ]; then
-                    ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: ${payer_balance} lamports)"
-                else
-                    ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: unverified — RPC unreachable)"
-                fi
+    # R7-03 (rc6 follow-up): always re-check balance, even if a
+    # service-fee.json file already exists from a prior attempt.
+    # A stale file from a failed install would otherwise short-circuit
+    # this guard and quietly stage a possibly-drained shared payer.
+    # If the balance is OK, we leave the existing file alone (no rewrite
+    # needed); if it's low, we delete the stale file so the CLI's own
+    # ensure_service_fee_wallet fallback path takes over with a fresh
+    # per-install keypair.
+    log "checking pilot rent-payer balance (devnet)..."
+    local payer_balance
+    payer_balance="$(pilot_payer_balance_lamports || true)"
+    if [ -n "$payer_balance" ] && [ "$payer_balance" -lt "$MIN_PILOT_PAYER_LAMPORTS" ] 2>/dev/null; then
+        warn "pilot rent-payer is low (${payer_balance} lamports < ${MIN_PILOT_PAYER_LAMPORTS}); falling back to per-install devnet airdrop."
+        warn "if registration fails with rate-limit, retry in a few minutes — funds are being topped up."
+        # Remove any stale staged keypair from a prior failed install so
+        # the CLI's ensure_service_fee_wallet path generates a fresh
+        # per-install keypair.
+        if [ -f "$fee_keypair_path" ]; then
+            rm -f "$fee_keypair_path"
+            log "removed stale service-fee.json so CLI can generate per-install keypair"
+        fi
+    elif [ ! -f "$fee_keypair_path" ]; then
+        log "staging pilot rent-payer keypair (v5 payer-only, owner remains local)..."
+        if printf '%s' "$NULLWIRE_PILOT_PAYER_KEYPAIR_B64" | base64 -d > "$fee_keypair_path" 2>/dev/null; then
+            chmod 600 "$fee_keypair_path"
+            if [ -n "$payer_balance" ]; then
+                ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: ${payer_balance} lamports)"
             else
-                warn "could not decode pilot rent-payer; falling back to per-install airdrop"
-                rm -f "$fee_keypair_path"
+                ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: unverified — RPC unreachable)"
             fi
+        else
+            warn "could not decode pilot rent-payer; falling back to per-install airdrop"
+            rm -f "$fee_keypair_path"
+        fi
+    else
+        if [ -n "$payer_balance" ]; then
+            ok "pilot rent-payer already staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: ${payer_balance} lamports)"
+        else
+            ok "pilot rent-payer already staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: unverified — RPC unreachable)"
         fi
     fi
 
