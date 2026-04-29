@@ -198,6 +198,7 @@ main() {
 
     # ─────────────────────────────────────────────────────────────
     # rc4 v5 split-payer: stage the pilot rent-payer keypair
+    # rc6 audit T2-F1: balance-gated staging
     # ─────────────────────────────────────────────────────────────
     #
     # Decode the embedded base64 keypair (see CONFIG block above) into
@@ -206,19 +207,61 @@ main() {
     # skips the airdrop step (its `ensure_service_fee_wallet` short-
     # circuits when the wallet has any balance ≥ 0.01 SOL).
     #
+    # rc6 audit T2-F1 (HIGH): the embedded keypair is publicly drainable.
+    # If a hostile actor hits the wallet with rapid `RegisterUserHandle`
+    # calls, balance can hit zero in under a minute. We pre-flight the
+    # balance over Solana JSON-RPC and fall through to the per-install
+    # faucet path when the wallet is below `MIN_PILOT_PAYER_LAMPORTS`,
+    # which avoids a confusing "registration failed" experience for the
+    # tester (they get the airdrop path with a clear top-up notice).
+    #
     # Permissions: 0600 — same posture as state.json.  This is harmless
     # on devnet (the keypair is in this public script anyway) but
     # follows the convention so a future rotation to per-install
     # keypairs doesn't leave a 0644 file lying around.
+
+    # 0.1 SOL = 100_000_000 lamports. Covers ~35 fresh registrations
+    # (~0.0028 SOL each). Enough headroom that a tester finishing the
+    # install before our top-up cron fires won't be blocked.
+    local MIN_PILOT_PAYER_LAMPORTS=100000000
     local fee_keypair_path="$NULLWIRE_HOME/state/service-fee.json"
+
+    # 5-second cap on the RPC; a slow Solana endpoint must not block
+    # the install.  On any network/parse failure we fall through to
+    # staging (fail-open) — the worst case is the user hits a drained
+    # wallet and gets a register error, identical to today.
+    pilot_payer_balance_lamports() {
+        local resp
+        resp="$(curl -sS -m 5 -X POST \
+            -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"${NULLWIRE_PILOT_PAYER_PUBKEY}\"]}" \
+            https://api.devnet.solana.com 2>/dev/null)" || return 1
+        # Extract "value":NUMBER from response (no jq dependency).
+        printf '%s' "$resp" | grep -oE '"value":[0-9]+' | head -1 | sed 's/.*://'
+    }
+
     if [ ! -f "$fee_keypair_path" ]; then
-        log "staging pilot rent-payer keypair (v5 payer-only, owner remains local)..."
-        if printf '%s' "$NULLWIRE_PILOT_PAYER_KEYPAIR_B64" | base64 -d > "$fee_keypair_path" 2>/dev/null; then
-            chmod 600 "$fee_keypair_path"
-            ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY)"
+        log "checking pilot rent-payer balance (devnet)..."
+        local payer_balance
+        payer_balance="$(pilot_payer_balance_lamports || true)"
+        if [ -n "$payer_balance" ] && [ "$payer_balance" -lt "$MIN_PILOT_PAYER_LAMPORTS" ] 2>/dev/null; then
+            warn "pilot rent-payer is low (${payer_balance} lamports < ${MIN_PILOT_PAYER_LAMPORTS}); falling back to per-install devnet airdrop."
+            warn "if registration fails with rate-limit, retry in a few minutes — funds are being topped up."
+            # Skip embedded-keypair staging; nullwire-cli will request
+            # an airdrop on its own keypair via ensure_service_fee_wallet.
         else
-            warn "could not decode pilot rent-payer; falling back to per-install airdrop"
-            rm -f "$fee_keypair_path"
+            log "staging pilot rent-payer keypair (v5 payer-only, owner remains local)..."
+            if printf '%s' "$NULLWIRE_PILOT_PAYER_KEYPAIR_B64" | base64 -d > "$fee_keypair_path" 2>/dev/null; then
+                chmod 600 "$fee_keypair_path"
+                if [ -n "$payer_balance" ]; then
+                    ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: ${payer_balance} lamports)"
+                else
+                    ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: unverified — RPC unreachable)"
+                fi
+            else
+                warn "could not decode pilot rent-payer; falling back to per-install airdrop"
+                rm -f "$fee_keypair_path"
+            fi
         fi
     fi
 
