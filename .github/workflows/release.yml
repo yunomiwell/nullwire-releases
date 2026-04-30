@@ -148,12 +148,23 @@ jobs:
       # That avoids a forgotten "notarization is silently disabled
       # forever" failure mode.
       - name: Notarize (macOS — auto-engages when APPLE_NOTARIZE_PASSWORD secret is set)
-        if: ${{ startsWith(matrix.target, 'macos') && secrets.APPLE_NOTARIZE_PASSWORD != '' }}
+        if: startsWith(matrix.target, 'macos')
         env:
           APPLE_NOTARIZE_USER: ${{ secrets.APPLE_NOTARIZE_USER }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
           APPLE_NOTARIZE_TEAM_ID: ${{ secrets.APPLE_NOTARIZE_TEAM_ID }}
         run: |
+          # X19 fix v2: gate at the runtime layer, not the if: layer.
+          # GitHub Actions does not expose `secrets` context inside
+          # step-level if: expressions (validation rejects the workflow
+          # before any job starts). Read the secret into env at the
+          # step level instead, then bail-with-notice if empty. Same
+          # auto-enable behavior, valid YAML.
+          if [ -z "${APPLE_NOTARIZE_PASSWORD:-}" ]; then
+            echo "::notice::skipping notarization — APPLE_NOTARIZE_PASSWORD secret not set"
+            echo "::notice::populate the secret in repo settings once Apple unblocks team 2BVDP7296P (DTS case 19631461) and the next tag push will notarize"
+            exit 0
+          fi
           BIN=source/phase0/target/${{ matrix.rust_target }}/release/nullwire-cli
           ZIP=$RUNNER_TEMP/nullwire-cli.zip
           ditto -c -k --keepParent "$BIN" "$ZIP"
