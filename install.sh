@@ -274,7 +274,14 @@ main() {
             if [ -n "$payer_balance" ]; then
                 ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: ${payer_balance} lamports)"
             else
-                ok "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: unverified — RPC unreachable)"
+                # X9 (R7-C MEDIUM): explicit fail-open messaging — the
+                # 5s RPC probe missed (transient devnet slowness, TLS
+                # hiccup, network blip). Surface a concrete recovery
+                # path so the tester is not surprised if register fails.
+                warn "pilot rent-payer staged ($NULLWIRE_PILOT_PAYER_PUBKEY) but balance unverified — devnet RPC unreachable in 5s probe."
+                warn "  if 'nullwire-cli setup' fails with 'insufficient funds' or 'register failed',"
+                warn "  retry in 1-2 minutes (devnet RPC may be transiently slow)."
+                warn "  persistent failure: report at relay@nullwire.xyz with 'pilot rent-payer status' in the subject."
             fi
         else
             warn "could not decode pilot rent-payer; falling back to per-install airdrop"
@@ -284,7 +291,13 @@ main() {
         if [ -n "$payer_balance" ]; then
             ok "pilot rent-payer already staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: ${payer_balance} lamports)"
         else
-            ok "pilot rent-payer already staged ($NULLWIRE_PILOT_PAYER_PUBKEY, balance: unverified — RPC unreachable)"
+            # X9 (R7-C MEDIUM): same explicit messaging as the staging
+            # path above — already-staged + unverified balance is the
+            # higher-risk state because we can't tell if the file is
+            # stale-from-a-failed-install or fine.
+            warn "pilot rent-payer already staged but balance unverified — devnet RPC unreachable in 5s probe."
+            warn "  if you see register errors below, the embedded keypair may be drained;"
+            warn "  remove ~/.nullwire/state/service-fee.json and re-run install to retry."
         fi
     fi
 
@@ -318,11 +331,32 @@ main() {
     log "installing nullwire-cli to $NULLWIRE_HOME/bin..."
     mv "$tmp_dir/$cli_asset" "$NULLWIRE_HOME/bin/nullwire-cli"
     chmod +x "$NULLWIRE_HOME/bin/nullwire-cli"
-    # Defensive: strip macOS quarantine attribute if present (only matters
-    # if the user obtained the binary via browser before piping; curl-fetched
-    # files don't have it). Silent no-op on Linux + when xattr absent.
-    if command -v xattr >/dev/null 2>&1; then
-        xattr -d com.apple.quarantine "$NULLWIRE_HOME/bin/nullwire-cli" 2>/dev/null || true
+    # X5 (R7-C HIGH, rc6 follow-up): conditional Gatekeeper strip.
+    #
+    # Today (Apple DTS case 102873775642 pending notarization unblock):
+    # binaries ship ad-hoc signed; without the strip Gatekeeper would
+    # refuse to launch and the install fails. Future (Apple unblocks):
+    # binaries ship Developer ID + stapled notarization; an
+    # unconditional strip would silently disable Gatekeeper EVEN when
+    # the binary is properly notarized — defeats defense-in-depth.
+    #
+    # Probe via `spctl --assess`. If "Notarized" → skip strip + log so
+    # the user knows notarization is active. Anything else (ad-hoc,
+    # rejected, no spctl) → strip + log + reference the sha256 verify
+    # above as the actual integrity root.
+    if [ "$(uname)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
+        local _gk_assess=""
+        if command -v spctl >/dev/null 2>&1; then
+            _gk_assess="$(spctl --assess --type execute --verbose=4 \
+                "$NULLWIRE_HOME/bin/nullwire-cli" 2>&1 || true)"
+        fi
+        if echo "$_gk_assess" | grep -q "source=Notarized Developer ID"; then
+            ok "binary is notarized (Apple Developer ID + stapled ticket); leaving Gatekeeper enabled"
+        else
+            log "binary is ad-hoc signed (Apple DTS case 102873775642 pending); enabling Gatekeeper bypass."
+            log "  integrity root for this install is the sha256 already verified above."
+            xattr -d com.apple.quarantine "$NULLWIRE_HOME/bin/nullwire-cli" 2>/dev/null || true
+        fi
     fi
     ok "installed nullwire-cli $NULLWIRE_VERSION"
 
