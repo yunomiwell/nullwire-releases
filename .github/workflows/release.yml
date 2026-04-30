@@ -130,16 +130,25 @@ jobs:
           echo "=== verify ad-hoc signature ==="
           codesign -dv --verbose=2 "$BIN" 2>&1 | head -8
 
-      # Notarization DISABLED until Apple Developer Programs Support configures
-      # Team 2BVDP7296P for notarization. Apple's notary returns status 7000
-      # ("Team is not yet configured for notarization") for every submission.
-      # While disabled, binaries ship codesigned-only — Gatekeeper shows
-      # "unnotarized Developer ID" (right-click→Open bypasses) instead of
-      # the scarier "revoked" verdict that comes from a rejected notary DB
-      # entry. Re-enable this step once Apple support resolves the team
-      # configuration; track via support case 102873775642.
-      - name: Notarize (macOS, DISABLED — Apple team not yet configured)
-        if: false
+      # X19 (R7-C LOW, rc6 follow-up): notarization auto-enables when
+      # the APPLE_NOTARIZE_PASSWORD secret is configured.
+      #
+      # Background: Apple has marked team 2BVDP7296P as not configured
+      # for notarization (Apple DTS case 19631461 pending — corrected
+      # from earlier comment that referenced wrong case 102873775642).
+      # Apple's notary returns status 7000 ("Team is not yet configured
+      # for notarization") for every submission. While the team stays
+      # unconfigured, the secret is unset → this step is skipped → we
+      # ship ad-hoc-signed binaries (Gatekeeper bypass via the install
+      # script's spctl probe in install.sh).
+      #
+      # When Apple unblocks the team and the secrets are populated in
+      # the nullwire-releases repo settings, this step auto-engages on
+      # the next tag push — no workflow edit + commit + repush needed.
+      # That avoids a forgotten "notarization is silently disabled
+      # forever" failure mode.
+      - name: Notarize (macOS — auto-engages when APPLE_NOTARIZE_PASSWORD secret is set)
+        if: ${{ startsWith(matrix.target, 'macos') && secrets.APPLE_NOTARIZE_PASSWORD != '' }}
         env:
           APPLE_NOTARIZE_USER: ${{ secrets.APPLE_NOTARIZE_USER }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}

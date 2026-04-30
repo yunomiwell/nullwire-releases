@@ -242,8 +242,17 @@ main() {
             -H 'Content-Type: application/json' \
             -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"${NULLWIRE_PILOT_PAYER_PUBKEY}\"]}" \
             https://api.devnet.solana.com 2>/dev/null)" || return 1
-        # Extract "value":NUMBER from response (no jq dependency).
-        printf '%s' "$resp" | grep -oE '"value":[0-9]+' | head -1 | sed 's/.*://'
+        # Extract "value":NUMBER from response — whitespace-tolerant
+        # (R7-06 LOW, rc6 follow-up). The Solana RPC can return either
+        # `"value":1234` or `"value": 1234` depending on the validator
+        # node's serializer; strict `[0-9]` after `:` failed on the
+        # latter. POSIX `[[:space:]]` is portable on macOS BSD grep
+        # and GNU grep. Still no jq dependency — the response shape is
+        # `..."value":NUMBER}...` in both spaced and unspaced cases.
+        printf '%s' "$resp" \
+            | grep -oE '"value"[[:space:]]*:[[:space:]]*[0-9]+' \
+            | head -1 \
+            | sed 's/.*[^0-9]\([0-9][0-9]*\)[^0-9]*/\1/'
     }
 
     # R7-03 (rc6 follow-up): always re-check balance, even if a
