@@ -149,6 +149,26 @@ jobs:
       # forever" failure mode.
       - name: Notarize (macOS — auto-engages when APPLE_NOTARIZE_PASSWORD secret is set)
         if: startsWith(matrix.target, 'macos')
+        continue-on-error: true
+        # X19 fix v3 (rc7 follow-up): notarize is best-effort.
+        #
+        # Apple's notary is blocked for team 2BVDP7296P (case 102873775642,
+        # statusCode 7000) AND the GitHub Actions APPLE_NOTARIZE_PASSWORD
+        # secret has gone stale (rc7 build failed with HTTP 401 invalid
+        # credentials). Both conditions must resolve before notarization
+        # can succeed:
+        #   1. Apple unblocks team configuration (case 102873775642)
+        #   2. Operator regenerates app-specific password at
+        #      appleid.apple.com and updates the GitHub secret
+        #
+        # Until then, this step runs, fails with 401 / 7000, and is
+        # ignored via continue-on-error. The macOS binary ships with
+        # ad-hoc signing only — install.sh's X5 conditional Gatekeeper
+        # bypass handles the install UX.
+        #
+        # Once both conditions are met, this step will succeed silently
+        # and the resulting binary will be properly notarized + stapled
+        # — no workflow edit + commit + repush required.
         env:
           APPLE_NOTARIZE_USER: ${{ secrets.APPLE_NOTARIZE_USER }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
