@@ -378,10 +378,27 @@ main() {
         # binary via include_dir!) but `nullwire-cli setup` still
         # requires it.  Pass it for compat — the directory gets
         # created but stays empty.
+        #
+        # rc7+: NULLWIRE_HANDLE env var plumbed through to setup's
+        # --handle flag. If unset, setup auto-generates @anon-XXXX
+        # (current behavior). If set, setup registers that exact handle
+        # — useful for cross-Mac testing or named-identity onboarding.
+        #
+        # Reserved handles (welcome, support, admin, martin, doxologic,
+        # yunomi, yunomiwell, etc.) are blocked at the CLI register
+        # layer. To register a reserved handle as the legitimate owner,
+        # also set NULLWIRE_ALLOW_RESERVED_HANDLE=1.
+        local handle_arg=""
+        if [ -n "${NULLWIRE_HANDLE:-}" ]; then
+            handle_arg="--handle ${NULLWIRE_HANDLE}"
+            log "using custom handle from NULLWIRE_HANDLE: @${NULLWIRE_HANDLE}"
+        fi
+        # shellcheck disable=SC2086 # word-splitting is intentional for the optional flag
         "$NULLWIRE_HOME/bin/nullwire-cli" setup \
             --state-dir "$NULLWIRE_HOME/state" \
             --ui-dir "$NULLWIRE_HOME/ui" \
-            --home "$NULLWIRE_HOME"
+            --home "$NULLWIRE_HOME" \
+            $handle_arg
         ok "identity created"
     fi
 
