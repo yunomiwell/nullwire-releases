@@ -32,7 +32,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc8}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc9}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
@@ -413,7 +413,23 @@ main() {
     # Wait briefly for server to be ready
     sleep 2
     if ! kill -0 "$server_pid" 2>/dev/null; then
-        fail "server failed to start — see $NULLWIRE_HOME/install.log"
+        fail "server failed to start — check the terminal output above for errors (port $NULLWIRE_PORT may already be in use)"
+    fi
+
+    # Send a kick-off "hi" to @welcome so the user sees a populated UI on first
+    # load.  Without this the messenger shows "WAITING FOR NODE" with no thread
+    # activity until the user manually types something — looks broken on first
+    # impression.  Best-effort — failures are non-fatal (don't escalate into
+    # install failure; the user can still send manually from the UI).
+    log "kicking off welcome conversation..."
+    if curl -fsSL -X POST "http://127.0.0.1:${NULLWIRE_PORT}/api/send" \
+        -H "Content-Type: application/json" \
+        -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
+        -d "{\"threadId\":\"welcome\",\"text\":\"hi\"}" \
+        >/dev/null 2>&1; then
+        ok "welcome message sent — check the UI for the bot's reply (~10-30s mesh round-trip)"
+    else
+        warn "welcome kick-off failed — you can manually send a 'hi' from the UI"
     fi
 
     # Open browser
