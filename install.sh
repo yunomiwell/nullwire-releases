@@ -32,7 +32,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc12}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc13}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
@@ -403,7 +403,15 @@ main() {
     fi
 
     # Start the messenger server (Rust, single binary, UI embedded).
+    # rc13: NULLWIRE_PAIR_BROKER_URL injects window.__NULLWIRE_PAIR_BROKER__
+    # into the embedded UI so the AddContact pair-code tab can reach the
+    # cross-origin broker at pair.nullwire.xyz (auto-clears the spurious
+    # "TESTING MODE — TURN RELAY NOT DEPLOYED" warning that rc12 shipped
+    # because the legacy server.mjs's inject path never ported to Rust).
+    # Tester can override at install time with NULLWIRE_PAIR_BROKER_URL=…
+    # but the default points at our deployed live broker.
     log "starting messenger on http://127.0.0.1:${NULLWIRE_PORT}..."
+    NULLWIRE_PAIR_BROKER_URL="${NULLWIRE_PAIR_BROKER_URL:-https://pair.nullwire.xyz}" \
     "$NULLWIRE_HOME/bin/nullwire-cli" server \
         --home "$NULLWIRE_HOME" \
         --port "$NULLWIRE_PORT" \
