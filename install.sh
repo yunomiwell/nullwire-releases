@@ -6,6 +6,9 @@
 # Usage:
 #   curl -sSL https://nullwire.xyz/install.sh | bash
 #
+# Pick your own handle (e.g. @alice — note: env var goes AFTER the pipe):
+#   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_HANDLE=alice bash
+#
 # What this does:
 #   1. Detects your platform (macOS/Linux, x86_64/arm64)
 #   2. Downloads the matching nullwire-cli binary from GitHub Releases
