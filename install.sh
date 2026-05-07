@@ -578,10 +578,24 @@ EOF
         --state-dir "$NULLWIRE_HOME/state" 2>/dev/null | head -20
     printf "${C_DIM}  ────────────────────────────────────────${C_RESET}\n\n"
 
-    printf "Press Ctrl+C to stop the server.\n\n"
-
-    # Keep script alive until server dies
-    wait "$server_pid"
+    # rc25: server is now a managed daemon (launchd / systemd-user), not a
+    # backgrounded child of this script.  Don't `wait` for a PID we no
+    # longer own — return immediately so the install shell exits cleanly.
+    printf "the server is running as a managed daemon — close this terminal whenever you want, the messenger keeps running.\n"
+    case "$os" in
+        macos)
+            printf "  control: ${C_DIM}launchctl unload ~/Library/LaunchAgents/xyz.nullwire.cli.plist${C_RESET} (stop)\n"
+            printf "         : ${C_DIM}launchctl   load ~/Library/LaunchAgents/xyz.nullwire.cli.plist${C_RESET} (start)\n"
+            printf "  logs   : ${C_DIM}${NULLWIRE_HOME}/server.log${C_RESET} + ${C_DIM}${NULLWIRE_HOME}/server.err${C_RESET}\n"
+            ;;
+        linux)
+            printf "  control: ${C_DIM}systemctl --user stop nullwire.service${C_RESET}\n"
+            printf "         : ${C_DIM}systemctl --user start nullwire.service${C_RESET}\n"
+            printf "  logs   : ${C_DIM}${NULLWIRE_HOME}/server.log${C_RESET} + ${C_DIM}${NULLWIRE_HOME}/server.err${C_RESET}\n"
+            printf "  tip (optional, for headless ops): ${C_DIM}sudo loginctl enable-linger \$USER${C_RESET} keeps the server running across user logout.\n"
+            ;;
+    esac
+    printf "\n"
 }
 
 main "$@"
