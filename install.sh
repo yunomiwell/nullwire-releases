@@ -252,14 +252,27 @@ EOF
 # address bar — looks like a native phone app).  Falls back to the
 # default browser if Chrome is unavailable.
 #
+# --user-data-dir is REQUIRED on macOS: without a dedicated profile,
+# Chrome reuses the existing browser process and silently ignores the
+# --window-size flag.  A NullWire-specific profile under
+# \$NULLWIRE_HOME/chrome-profile keeps the messenger isolated from the
+# user's normal Chrome (no shared cookies, no shared history) — that's
+# actually the right posture: this is a separate app, not a tab in
+# your regular browser.
+#
 # Daemon itself is managed by launchd; this is purely a UI shortcut.
 URL="http://127.0.0.1:${NULLWIRE_PORT}"
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+PROFILE="$NULLWIRE_HOME/chrome-profile"
 if [ -x "\$CHROME" ]; then
+    mkdir -p "\$PROFILE"
     "\$CHROME" \\
+        --user-data-dir="\$PROFILE" \\
         --app="\$URL" \\
         --window-size=393,852 \\
-        --window-position=100,100 \\
+        --window-position=120,120 \\
+        --no-first-run \\
+        --no-default-browser-check \\
         >/dev/null 2>&1 &
     disown
 else
