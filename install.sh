@@ -703,8 +703,19 @@ EOF
   </dict>
   <key>RunAtLoad</key>
   <true/>
+  <!-- rc30 fix: respect "Quit Tray Icon" menu click.  KeepAlive=true
+       (the original) made launchd respawn the tray a few hundred ms
+       after the user clicked Quit, so the icon kept reappearing and
+       users had to click Quit twice (or more).  The dict form below
+       narrows KeepAlive to "only relaunch on ABNORMAL exit": an
+       intentional Quit returns 0 → launchd leaves it dead;
+       a crash returns non-zero → launchd respawns within
+       ThrottleInterval. -->
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
