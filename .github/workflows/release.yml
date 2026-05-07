@@ -23,10 +23,31 @@
 
 name: Release
 
+# Disabled rc32 (2026-05-07).  This CI workflow predates the local
+# `scripts/build-release.sh` + manual `gh release create` flow that
+# we've been shipping with since rc25.  It tries to fetch the private
+# `yunomiwell/nullwire-core` source via deploy key + tag-mirror, but
+# we only tag the SOURCE repo locally (the deploy key has been
+# rotated and the source-tag mirror has never been wired up), so
+# every `v*` tag push to THIS repo triggers a failed CI run + spam
+# email.  The GH releases for rc25-rc32 were all created manually
+# via `gh release create` and are healthy; this CI noise was orthogonal.
+#
+# Manual flow that actually works:
+#   1. Local build:    bash scripts/build-release.sh
+#   2. Sign manifest:  bash scripts/sign-releases-json.sh nullwire_web/releases.json
+#   3. Push tag here:  git tag vX.Y.Z-rcN && git push origin vX.Y.Z-rcN
+#   4. GH release:     gh release create vX.Y.Z-rcN --notes-file ... <assets>
+#   5. Push web:       (cd nullwire_web && git push)
+#
+# To re-enable: switch `on:` back to the tag-push trigger, rotate
+# `PRIVATE_SOURCE_DEPLOY_KEY` (read-only access to nullwire-core),
+# wire up a source-tag mirror so a tag pushed here also exists at
+# the same name in nullwire-core, and either remove the manual
+# `gh release create` step OR have the CI upload to the existing
+# release with `gh release upload --clobber`.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write   # needed to create the GitHub Release
