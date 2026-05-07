@@ -424,6 +424,10 @@ main() {
     sleep 2
 
     local broker_url="${NULLWIRE_PAIR_BROKER_URL:-https://pair.nullwire.xyz}"
+    # rc25 fix: re-derive `os` from $platform since detect_platform()'s
+    # local var doesn't escape the function (we get only the
+    # "macos-arm64" / "linux-x86_64" string back).
+    local os="${platform%%-*}"
 
     case "$os" in
         macos)
