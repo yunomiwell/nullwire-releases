@@ -35,7 +35,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc24}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc25}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
@@ -405,26 +405,134 @@ main() {
         ok "identity created"
     fi
 
-    # Start the messenger server (Rust, single binary, UI embedded).
-    # rc13: NULLWIRE_PAIR_BROKER_URL injects window.__NULLWIRE_PAIR_BROKER__
-    # into the embedded UI so the AddContact pair-code tab can reach the
-    # cross-origin broker at pair.nullwire.xyz (auto-clears the spurious
-    # "TESTING MODE — TURN RELAY NOT DEPLOYED" warning that rc12 shipped
-    # because the legacy server.mjs's inject path never ported to Rust).
-    # Tester can override at install time with NULLWIRE_PAIR_BROKER_URL=…
-    # but the default points at our deployed live broker.
-    log "starting messenger on http://127.0.0.1:${NULLWIRE_PORT}..."
-    NULLWIRE_PAIR_BROKER_URL="${NULLWIRE_PAIR_BROKER_URL:-https://pair.nullwire.xyz}" \
-    "$NULLWIRE_HOME/bin/nullwire-cli" server \
-        --home "$NULLWIRE_HOME" \
-        --port "$NULLWIRE_PORT" \
-        --bind 127.0.0.1 &
-    local server_pid=$!
+    # rc25: install the messenger server as a real OS service so it
+    # survives terminal close, auto-starts on login, and respawns on
+    # crash.  Pre-rc25 the server was launched with `&` from install.sh,
+    # which inherited the install shell's stdout — closing the terminal
+    # killed the server (HUP signal propagation through the parent
+    # shell).  Users were complaining about "messenger stops working
+    # when I close terminal" + "have to re-run install every reboot."
+    # Now: launchd agent on macOS, systemd --user unit on Linux.
+    #
+    # rc13 carried over: NULLWIRE_PAIR_BROKER_URL gets baked into the
+    # service's environment so the AddContact pair-code tab reaches
+    # the cross-origin broker at pair.nullwire.xyz.
 
-    # Wait briefly for server to be ready
+    # First: kill any pre-rc25 manually-backgrounded server so the new
+    # daemon doesn't fail with port-in-use.  Skips silently if none.
+    pkill -TERM -f 'nullwire-cli server' 2>/dev/null || true
     sleep 2
-    if ! kill -0 "$server_pid" 2>/dev/null; then
-        fail "server failed to start — check the terminal output above for errors (port $NULLWIRE_PORT may already be in use)"
+
+    local broker_url="${NULLWIRE_PAIR_BROKER_URL:-https://pair.nullwire.xyz}"
+
+    case "$os" in
+        macos)
+            # ~/Library/LaunchAgents/xyz.nullwire.cli.plist
+            local plist_dir="$HOME/Library/LaunchAgents"
+            local plist_path="$plist_dir/xyz.nullwire.cli.plist"
+            mkdir -p "$plist_dir"
+
+            # Unload existing if present (idempotent for upgrades).
+            launchctl bootout "gui/$(id -u)/xyz.nullwire.cli" 2>/dev/null || true
+            launchctl unload "$plist_path" 2>/dev/null || true
+
+            cat > "$plist_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xyz.nullwire.cli</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$NULLWIRE_HOME/bin/nullwire-cli</string>
+    <string>server</string>
+    <string>--home</string>
+    <string>$NULLWIRE_HOME</string>
+    <string>--port</string>
+    <string>$NULLWIRE_PORT</string>
+    <string>--bind</string>
+    <string>127.0.0.1</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NULLWIRE_PAIR_BROKER_URL</key>
+    <string>$broker_url</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>$NULLWIRE_HOME/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>$NULLWIRE_HOME/server.err</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
+EOF
+            chmod 644 "$plist_path"
+            log "starting messenger via launchd at http://127.0.0.1:${NULLWIRE_PORT}..."
+            launchctl bootstrap "gui/$(id -u)" "$plist_path" 2>/dev/null \
+                || launchctl load "$plist_path"
+            ;;
+        linux)
+            # ~/.config/systemd/user/nullwire.service
+            local unit_dir="$HOME/.config/systemd/user"
+            local unit_path="$unit_dir/nullwire.service"
+            mkdir -p "$unit_dir"
+
+            # Stop existing if present (idempotent for upgrades).
+            systemctl --user stop nullwire.service 2>/dev/null || true
+
+            cat > "$unit_path" <<EOF
+[Unit]
+Description=NullWire messenger server
+After=network.target
+
+[Service]
+ExecStart=$NULLWIRE_HOME/bin/nullwire-cli server --home $NULLWIRE_HOME --port $NULLWIRE_PORT --bind 127.0.0.1
+Restart=on-failure
+RestartSec=10
+Environment=NULLWIRE_PAIR_BROKER_URL=$broker_url
+StandardOutput=append:$NULLWIRE_HOME/server.log
+StandardError=append:$NULLWIRE_HOME/server.err
+
+[Install]
+WantedBy=default.target
+EOF
+            chmod 644 "$unit_path"
+            log "starting messenger via systemd at http://127.0.0.1:${NULLWIRE_PORT}..."
+            systemctl --user daemon-reload
+            systemctl --user enable --now nullwire.service
+            # Note: for the server to survive logout, user must run:
+            #   sudo loginctl enable-linger $USER
+            # We do NOT auto-enable linger — too invasive for an installer
+            # and most pilot testers stay logged in anyway.  Surface as an
+            # opt-in tip below.
+            ;;
+        *)
+            fail "service installation not supported on $os"
+            ;;
+    esac
+
+    # Wait for the daemon to be reachable on its HTTP port (replaces the
+    # rc24-and-earlier `kill -0 server_pid` check, which doesn't apply
+    # to managed daemons whose PID is owned by launchd / systemd).
+    local attempts=0
+    while [ $attempts -lt 30 ]; do
+        if curl -fsS -o /dev/null "http://127.0.0.1:${NULLWIRE_PORT}/api/health" 2>/dev/null; then
+            ok "messenger server is up (managed by $os service)"
+            break
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+    if [ $attempts -ge 30 ]; then
+        fail "server did not respond on http://127.0.0.1:${NULLWIRE_PORT} within 30s — check $NULLWIRE_HOME/server.err"
     fi
 
     # Send a kick-off "hi" to @welcome so the user sees a populated UI on first
