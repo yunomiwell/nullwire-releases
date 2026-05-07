@@ -246,10 +246,25 @@ install_desktop_icon() {
 EOF
             cat > "$app_path/Contents/MacOS/NullWire" <<EOF
 #!/bin/sh
-# NullWire desktop launcher (rc30+).
-# Just opens the local messenger UI in the default browser.
+# NullWire desktop launcher (rc32+).
+# Opens the messenger in a chromeless phone-sized window via Chrome's
+# --app mode (iPhone 17 Pro logical dimensions: 393×852, no tabs, no
+# address bar — looks like a native phone app).  Falls back to the
+# default browser if Chrome is unavailable.
+#
 # Daemon itself is managed by launchd; this is purely a UI shortcut.
-exec /usr/bin/open "http://127.0.0.1:${NULLWIRE_PORT}"
+URL="http://127.0.0.1:${NULLWIRE_PORT}"
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+if [ -x "\$CHROME" ]; then
+    "\$CHROME" \\
+        --app="\$URL" \\
+        --window-size=393,852 \\
+        --window-position=100,100 \\
+        >/dev/null 2>&1 &
+    disown
+else
+    exec /usr/bin/open "\$URL"
+fi
 EOF
             chmod +x "$app_path/Contents/MacOS/NullWire"
 
