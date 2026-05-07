@@ -872,14 +872,42 @@ EOF
         warn "welcome kick-off failed — you can manually send a 'hi' from the UI"
     fi
 
-    # Open browser
+    # Open browser.
+    #
+    # rc34 fix: previously this used `open <url>` which hands off to the
+    # default URL handler (your existing Chrome profile) and opens a
+    # plain tab in your already-running browser — defeating the whole
+    # point of the chromeless 393x852 phone-sized launcher we just
+    # baked into ~/Desktop/NullWire.app.  On macOS we now invoke the
+    # exact same Chrome --app path the desktop launcher uses (with a
+    # NullWire-isolated profile so the window-size flag is honoured),
+    # so the post-install UX matches the desktop-icon UX.  Falls back
+    # to plain `open` if Chrome isn't installed.
     log "opening browser..."
-    if command -v open >/dev/null 2>&1; then
-        open "http://127.0.0.1:${NULLWIRE_PORT}"
+    URL="http://127.0.0.1:${NULLWIRE_PORT}"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        PROFILE="${NULLWIRE_HOME}/chrome-profile"
+        if [ -x "$CHROME" ]; then
+            mkdir -p "$PROFILE"
+            "$CHROME" \
+                --user-data-dir="$PROFILE" \
+                --app="$URL" \
+                --window-size=393,852 \
+                --window-position=120,120 \
+                --no-first-run \
+                --no-default-browser-check \
+                >/dev/null 2>&1 &
+            disown 2>/dev/null || true
+        elif command -v open >/dev/null 2>&1; then
+            open "$URL"
+        else
+            warn "could not auto-open browser — go to ${URL} manually"
+        fi
     elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "http://127.0.0.1:${NULLWIRE_PORT}"
+        xdg-open "$URL"
     else
-        warn "could not auto-open browser — go to http://127.0.0.1:${NULLWIRE_PORT} manually"
+        warn "could not auto-open browser — go to ${URL} manually"
     fi
 
     # Print bundle for sharing
