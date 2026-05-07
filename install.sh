@@ -331,7 +331,13 @@ main() {
     # Fetch checksums manifest first — it's small, signed, and drives verification
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    # Bake the resolved path into the trap NOW (double-quoted) so the
+    # cleanup runs even after this function returns and `tmp_dir`
+    # falls out of `local` scope.  rc29 fix: a single-quoted trap
+    # ('rm -rf "$tmp_dir"') deferred expansion to EXIT time, by which
+    # point `tmp_dir` was unbound under `set -u`, producing the
+    # "unbound variable" error users saw at the very end of install.
+    trap "rm -rf '$tmp_dir'" EXIT
 
     download "$checksums_url" "$tmp_dir/checksums.sha256"
 
