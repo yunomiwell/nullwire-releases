@@ -35,7 +35,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc27}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc28}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
@@ -315,8 +315,17 @@ main() {
 
     # Determine download URLs.  v0.1.3+: single binary per platform,
     # UI bundled via include_dir!. No more separate UI tarball.
+    #
+    # rc28: a SECOND binary `nullwire-tray-${platform}` is shipped alongside
+    # the CLI. It is the menubar / system-tray helper (separate launchd
+    # plist on macOS, separate systemd-user unit on Linux). Two binaries
+    # because the daemon is headless and the tray needs an event loop +
+    # GUI runtime — coupling them would force the daemon to inherit the
+    # desktop session lifetime, which we do NOT want (the daemon has to
+    # survive logout). We download + sha256-verify both.
     local base_url="${NULLWIRE_RELEASES_BASE}/${NULLWIRE_VERSION}"
     local cli_asset="nullwire-cli-${platform}"
+    local tray_asset="nullwire-tray-${platform}"
     local checksums_url="${base_url}/checksums.sha256"
 
     # Fetch checksums manifest first — it's small, signed, and drives verification
@@ -335,14 +344,53 @@ main() {
     This version of the installer may not match the release."
     fi
 
+    # rc28: extract the tray-binary hash if the release ships one. We treat
+    # the tray as OPTIONAL: a release without a tray asset (older versions,
+    # or a partial release rebuild) installs cleanly minus the menubar
+    # icon.  The fail-soft model means a CDN propagation lag for the tray
+    # asset doesn't break the messenger setup itself.
+    local tray_hash
+    tray_hash="$(grep " $tray_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}' || true)"
+
     # Download CLI binary (UI bundled inside).
     download "$base_url/$cli_asset" "$tmp_dir/$cli_asset"
     verify_sha256 "$tmp_dir/$cli_asset" "$cli_hash"
+
+    # Download tray binary if the release advertises one.  Best-effort:
+    # log + continue on download/verify failure so a transient CDN issue
+    # on the tray asset doesn't block the messenger install.
+    if [ -n "$tray_hash" ]; then
+        if curl -sSL --fail "$base_url/$tray_asset" -o "$tmp_dir/$tray_asset" 2>/dev/null; then
+            local actual_tray_hash
+            actual_tray_hash="$(shasum -a 256 "$tmp_dir/$tray_asset" | awk '{print $1}')"
+            if [ "$actual_tray_hash" = "$tray_hash" ]; then
+                ok "verified $tray_asset"
+            else
+                warn "tray binary checksum mismatch — skipping menubar helper install."
+                rm -f "$tmp_dir/$tray_asset"
+            fi
+        else
+            warn "could not fetch $tray_asset — skipping menubar helper install."
+        fi
+    else
+        log "this release does not ship a menubar helper (rc28+ feature); skipping tray install."
+    fi
 
     # Install CLI
     log "installing nullwire-cli to $NULLWIRE_HOME/bin..."
     mv "$tmp_dir/$cli_asset" "$NULLWIRE_HOME/bin/nullwire-cli"
     chmod +x "$NULLWIRE_HOME/bin/nullwire-cli"
+
+    # rc28: install tray binary too if we successfully downloaded + verified
+    # it above.  `tray_present` gates the launchd / systemd setup later so
+    # we only register the tray service when the binary is actually on disk.
+    local tray_present=0
+    if [ -f "$tmp_dir/$tray_asset" ]; then
+        log "installing nullwire-tray to $NULLWIRE_HOME/bin..."
+        mv "$tmp_dir/$tray_asset" "$NULLWIRE_HOME/bin/nullwire-tray"
+        chmod +x "$NULLWIRE_HOME/bin/nullwire-tray"
+        tray_present=1
+    fi
     # X5 (R7-C HIGH, rc6 follow-up): conditional Gatekeeper strip.
     #
     # Today (Apple DTS case 102873775642 pending notarization unblock):
@@ -368,9 +416,18 @@ main() {
             log "binary is ad-hoc signed (Apple DTS case 102873775642 pending); enabling Gatekeeper bypass."
             log "  integrity root for this install is the sha256 already verified above."
             xattr -d com.apple.quarantine "$NULLWIRE_HOME/bin/nullwire-cli" 2>/dev/null || true
+            # rc28: same posture for the tray binary.  Skipped silently if
+            # the tray asset wasn't shipped in this release (the file just
+            # doesn't exist yet) — xattr -d treats missing-attr as success.
+            if [ "$tray_present" = "1" ]; then
+                xattr -d com.apple.quarantine "$NULLWIRE_HOME/bin/nullwire-tray" 2>/dev/null || true
+            fi
         fi
     fi
     ok "installed nullwire-cli $NULLWIRE_VERSION"
+    if [ "$tray_present" = "1" ]; then
+        ok "installed nullwire-tray $NULLWIRE_VERSION"
+    fi
 
     # Run initial setup (creates identity + prekey bundle)
     log "initializing your identity..."
@@ -421,6 +478,11 @@ main() {
     # First: kill any pre-rc25 manually-backgrounded server so the new
     # daemon doesn't fail with port-in-use.  Skips silently if none.
     pkill -TERM -f 'nullwire-cli server' 2>/dev/null || true
+    # rc28: kill any previous tray-helper instance too so the new binary
+    # can replace it cleanly.  launchctl bootout does this implicitly when
+    # the plist is reloaded, but we belt-and-braces in case the user is
+    # upgrading from a build that ran the tray manually outside launchd.
+    pkill -TERM -f 'nullwire-tray' 2>/dev/null || true
     sleep 2
 
     local broker_url="${NULLWIRE_PAIR_BROKER_URL:-https://pair.nullwire.xyz}"
@@ -482,6 +544,65 @@ EOF
             log "starting messenger via launchd at http://127.0.0.1:${NULLWIRE_PORT}..."
             launchctl bootstrap "gui/$(id -u)" "$plist_path" 2>/dev/null \
                 || launchctl load "$plist_path"
+
+            # rc28: separate launchd plist for the menubar helper.
+            #
+            # Why a separate plist instead of merging into the daemon's:
+            #   - The tray helper is a GUI process (NSStatusItem requires
+            #     a Cocoa runtime + accessory activation policy). The
+            #     daemon must NOT be a GUI process (it runs under
+            #     ProcessType=Background, no AppKit, no Dock entry).
+            #   - We want them to crash-isolate: a tray-icon library
+            #     panic must not nuke the messenger; a daemon segfault
+            #     must not kill the menubar.
+            #   - launchd's KeepAlive applies per-Label, so each gets its
+            #     own respawn policy.
+            #
+            # NULLWIRE_HOME is plumbed through as an env var so the tray
+            # helper writes its "Pause Notifications" marker into the same
+            # state dir the daemon reads from.
+            if [ "$tray_present" = "1" ]; then
+                local tray_plist_path="$plist_dir/xyz.nullwire.tray.plist"
+
+                launchctl bootout "gui/$(id -u)/xyz.nullwire.tray" 2>/dev/null || true
+                launchctl unload "$tray_plist_path" 2>/dev/null || true
+
+                cat > "$tray_plist_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xyz.nullwire.tray</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$NULLWIRE_HOME/bin/nullwire-tray</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NULLWIRE_HOME</key>
+    <string>$NULLWIRE_HOME</string>
+    <key>NULLWIRE_PORT</key>
+    <string>$NULLWIRE_PORT</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>$NULLWIRE_HOME/tray.log</string>
+  <key>StandardErrorPath</key>
+  <string>$NULLWIRE_HOME/tray.err</string>
+</dict>
+</plist>
+EOF
+                chmod 644 "$tray_plist_path"
+                log "starting tray helper via launchd..."
+                launchctl bootstrap "gui/$(id -u)" "$tray_plist_path" 2>/dev/null \
+                    || launchctl load "$tray_plist_path"
+            fi
             ;;
         linux)
             # ~/.config/systemd/user/nullwire.service
@@ -512,6 +633,42 @@ EOF
             log "starting messenger via systemd at http://127.0.0.1:${NULLWIRE_PORT}..."
             systemctl --user daemon-reload
             systemctl --user enable --now nullwire.service
+
+            # rc28: separate systemd-user unit for the menubar / system-tray
+            # helper.  Same "two units, crash-isolated" rationale as the
+            # macOS plist split above.  WantedBy=graphical-session.target
+            # would be more correct (the tray needs an X11 / Wayland
+            # display) but `default.target` matches the daemon's posture
+            # and works on the systemd-user setups we ship to (Ubuntu,
+            # Debian, Fedora). The tray gracefully no-ops if no display
+            # is available — the tray-icon crate logs and exits.
+            if [ "$tray_present" = "1" ]; then
+                local tray_unit_path="$unit_dir/nullwire-tray.service"
+
+                systemctl --user stop nullwire-tray.service 2>/dev/null || true
+
+                cat > "$tray_unit_path" <<EOF
+[Unit]
+Description=NullWire menubar / system-tray helper
+After=graphical-session.target nullwire.service
+
+[Service]
+ExecStart=$NULLWIRE_HOME/bin/nullwire-tray
+Restart=on-failure
+RestartSec=10
+Environment=NULLWIRE_HOME=$NULLWIRE_HOME
+Environment=NULLWIRE_PORT=$NULLWIRE_PORT
+StandardOutput=append:$NULLWIRE_HOME/tray.log
+StandardError=append:$NULLWIRE_HOME/tray.err
+
+[Install]
+WantedBy=default.target
+EOF
+                chmod 644 "$tray_unit_path"
+                log "starting tray helper via systemd..."
+                systemctl --user daemon-reload
+                systemctl --user enable --now nullwire-tray.service
+            fi
             # Note: for the server to survive logout, user must run:
             #   sudo loginctl enable-linger $USER
             # We do NOT auto-enable linger — too invasive for an installer
@@ -587,11 +744,18 @@ EOF
             printf "  control: ${C_DIM}launchctl unload ~/Library/LaunchAgents/xyz.nullwire.cli.plist${C_RESET} (stop)\n"
             printf "         : ${C_DIM}launchctl   load ~/Library/LaunchAgents/xyz.nullwire.cli.plist${C_RESET} (start)\n"
             printf "  logs   : ${C_DIM}${NULLWIRE_HOME}/server.log${C_RESET} + ${C_DIM}${NULLWIRE_HOME}/server.err${C_RESET}\n"
+            if [ "$tray_present" = "1" ]; then
+                printf "  tray   : ${C_DIM}launchctl unload ~/Library/LaunchAgents/xyz.nullwire.tray.plist${C_RESET} (hide menubar)\n"
+                printf "         : ${C_DIM}~/.nullwire/bin/nullwire-tray${C_RESET} (run inline for debugging)\n"
+            fi
             ;;
         linux)
             printf "  control: ${C_DIM}systemctl --user stop nullwire.service${C_RESET}\n"
             printf "         : ${C_DIM}systemctl --user start nullwire.service${C_RESET}\n"
             printf "  logs   : ${C_DIM}${NULLWIRE_HOME}/server.log${C_RESET} + ${C_DIM}${NULLWIRE_HOME}/server.err${C_RESET}\n"
+            if [ "$tray_present" = "1" ]; then
+                printf "  tray   : ${C_DIM}systemctl --user stop nullwire-tray.service${C_RESET} (hide tray)\n"
+            fi
             printf "  tip (optional, for headless ops): ${C_DIM}sudo loginctl enable-linger \$USER${C_RESET} keeps the server running across user logout.\n"
             ;;
     esac
