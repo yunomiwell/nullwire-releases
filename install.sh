@@ -181,6 +181,116 @@ verify_sha256() {
 }
 
 # ─────────────────────────────────────────────────────────────────
+# rc30: install a Desktop launcher icon.
+#
+# macOS  → ~/Desktop/NullWire.app  (proper .app bundle with .icns)
+# Linux  → ~/Desktop/NullWire.desktop  (XDG entry pointing at icon-512.png)
+#
+# Best-effort.  Failures (no Desktop folder, network error fetching the
+# icon, sips/iconutil missing on a stripped macOS) downgrade silently to
+# a `warn` — the messenger still runs, the user can always reach it via
+# the menubar tray icon (rc28) or by visiting http://127.0.0.1:4310.
+#
+# The .app bundle is intentionally tiny: a CFBundleExecutable shell
+# script that just `open`s the loopback URL.  No code-signing required
+# because the bundle ships no native binary, just a shell script — Gate-
+# keeper does not assess script-only .app bundles the way it does
+# Mach-O bundles.
+# ─────────────────────────────────────────────────────────────────
+install_desktop_icon() {
+    local platform="$1"
+    local desktop_dir="$HOME/Desktop"
+    if [ ! -d "$desktop_dir" ]; then
+        log "no Desktop folder — skipping desktop icon"
+        return 0
+    fi
+
+    case "$platform" in
+        macos-*)
+            local app_path="$desktop_dir/NullWire.app"
+            if [ -d "$app_path" ]; then
+                log "desktop icon already exists at $app_path — refreshing"
+                rm -rf "$app_path"
+            fi
+            mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+
+            # Fetch the prebuilt .icns from the public CDN.  Best-effort:
+            # if the fetch fails the .app still works (Finder shows a
+            # generic app icon instead of the NullWire glyph).
+            local icns_url="https://nullwire.xyz/NullWire.icns"
+            if ! curl -sSL --fail --max-time 10 "$icns_url" \
+                -o "$app_path/Contents/Resources/AppIcon.icns" 2>/dev/null; then
+                warn "could not fetch desktop icon from $icns_url; .app will use generic Finder icon"
+            fi
+
+            # Strip leading "v" from the version (CFBundleShortVersionString
+            # rejects non-numeric leading chars on some macOS versions).
+            local short_version="${NULLWIRE_VERSION#v}"
+            cat > "$app_path/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>NullWire</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIdentifier</key><string>xyz.nullwire.desktop-launcher</string>
+    <key>CFBundleName</key><string>NullWire</string>
+    <key>CFBundleDisplayName</key><string>NullWire</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>${short_version}</string>
+    <key>CFBundleVersion</key><string>${short_version}</string>
+    <key>LSUIElement</key><false/>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+EOF
+            cat > "$app_path/Contents/MacOS/NullWire" <<EOF
+#!/bin/sh
+# NullWire desktop launcher (rc30+).
+# Just opens the local messenger UI in the default browser.
+# Daemon itself is managed by launchd; this is purely a UI shortcut.
+exec /usr/bin/open "http://127.0.0.1:${NULLWIRE_PORT}"
+EOF
+            chmod +x "$app_path/Contents/MacOS/NullWire"
+
+            # Force Finder to refresh its icon cache for the new bundle.
+            # Without this the .app sometimes shows the generic icon
+            # until the next login.  `touch` updates mtime on the bundle
+            # which is enough for Finder to re-read Info.plist + .icns.
+            touch "$app_path"
+
+            ok "desktop icon installed at ~/Desktop/NullWire.app"
+            ;;
+        linux-*)
+            local icon_url="https://nullwire.xyz/icons/icon-512.png"
+            local icon_path="$NULLWIRE_HOME/icons/NullWire.png"
+            mkdir -p "$NULLWIRE_HOME/icons"
+            if ! curl -sSL --fail --max-time 10 "$icon_url" -o "$icon_path" 2>/dev/null; then
+                warn "could not fetch desktop icon — skipping"
+                return 0
+            fi
+            local desktop_file="$desktop_dir/NullWire.desktop"
+            cat > "$desktop_file" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NullWire
+GenericName=Post-quantum E2E messenger
+Comment=Open the NullWire messenger in your browser
+Exec=xdg-open http://127.0.0.1:${NULLWIRE_PORT}
+Icon=${icon_path}
+Categories=Network;InstantMessaging;
+Terminal=false
+EOF
+            chmod +x "$desktop_file"
+            ok "desktop icon installed at ~/Desktop/NullWire.desktop"
+            ;;
+        *)
+            ;;
+    esac
+}
+
+# ─────────────────────────────────────────────────────────────────
 # MAIN INSTALL FLOW
 # ─────────────────────────────────────────────────────────────────
 main() {
@@ -701,6 +811,11 @@ EOF
     if [ $attempts -ge 30 ]; then
         fail "server did not respond on http://127.0.0.1:${NULLWIRE_PORT} within 30s — check $NULLWIRE_HOME/server.err"
     fi
+
+    # rc30: install a Desktop launcher icon (best-effort).  See the
+    # function definition for platform-specific behaviour.  The
+    # `platform` variable is set near the top of `main`.
+    install_desktop_icon "$platform"
 
     # Send a kick-off "hi" to @welcome so the user sees a populated UI on first
     # load.  Without this the messenger shows "WAITING FOR NODE" with no thread
