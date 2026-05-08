@@ -236,9 +236,34 @@ install_desktop_icon() {
             local app_path="$desktop_dir/NullWire.app"
             if [ -d "$app_path" ]; then
                 log "desktop icon already exists at $app_path — refreshing"
-                rm -rf "$app_path"
+                # rc37 fix: macOS TCC can deny Desktop deletes when the .app
+                # has a `com.apple.macl` xattr (granted-application MAC tag)
+                # and/or `com.apple.fileprovider.fpfs#P` (iCloud Drive Desktop
+                # sync provenance).  Earlier rcs let `rm -rf` fail under
+                # set -e and aborted the whole install at the desktop-icon
+                # step, masking the fact that the binary install + daemon
+                # restart had already succeeded.  Now: the rm is best-
+                # effort, and if it fails we warn + skip the refresh,
+                # leaving the existing .app in place.  The existing .app's
+                # CFBundleExecutable shell script works fine for Chrome-
+                # installed users; rc36+ multi-browser fallback is
+                # cosmetic-only when Chrome is present.
+                if ! rm -rf "$app_path" 2>/dev/null; then
+                    warn "could not refresh desktop icon at $app_path"
+                    warn "  macOS TCC is blocking the delete (likely com.apple.macl xattr or iCloud Drive Desktop sync)"
+                    warn "  the existing .app continues to work — to refresh manually:"
+                    warn "    drag $app_path to Trash via Finder, then re-run install.sh"
+                    return 0
+                fi
             fi
-            mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+            # rc37 fix: even mkdir can fail under TCC if the parent
+            # Desktop folder denies writes to bash.  Same posture as
+            # the rm above — warn + skip, never abort the install.
+            if ! mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources" 2>/dev/null; then
+                warn "could not create $app_path (macOS TCC blocked Desktop write)"
+                warn "  grant Terminal 'Files and Folders → Desktop' or 'Full Disk Access' in System Settings → Privacy & Security to enable the Desktop icon"
+                return 0
+            fi
 
             # Fetch the prebuilt .icns from the public CDN.  Best-effort:
             # if the fetch fails the .app still works (Finder shows a
