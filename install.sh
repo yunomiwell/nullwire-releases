@@ -262,11 +262,38 @@ EOF
 #
 # Daemon itself is managed by launchd; this is purely a UI shortcut.
 URL="http://127.0.0.1:${NULLWIRE_PORT}"
-CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 PROFILE="$NULLWIRE_HOME/chrome-profile"
-if [ -x "\$CHROME" ]; then
+# rc36: walk priority list of Chromium-family browsers (all support
+# the same --app/--user-data-dir/--window-size flags).  First binary
+# that resolves to an executable file wins.  NULLWIRE_BROWSER env
+# overrides for non-default install locations.  Profile dir name kept
+# as "chrome-profile" for backward compat — Chromium profile data is
+# engine-compatible across the family.
+CANDIDATES="
+\${NULLWIRE_BROWSER:-}
+/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+/Applications/Brave Browser.app/Contents/MacOS/Brave Browser
+/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+/Applications/Arc.app/Contents/MacOS/Arc
+/Applications/Vivaldi.app/Contents/MacOS/Vivaldi
+/Applications/Chromium.app/Contents/MacOS/Chromium
+/Applications/Opera.app/Contents/MacOS/Opera
+"
+BROWSER=""
+OLDIFS="\$IFS"
+IFS='
+'
+for c in \$CANDIDATES; do
+    [ -z "\$c" ] && continue
+    if [ -x "\$c" ]; then
+        BROWSER="\$c"
+        break
+    fi
+done
+IFS="\$OLDIFS"
+if [ -n "\$BROWSER" ]; then
     mkdir -p "\$PROFILE"
-    "\$CHROME" \\
+    "\$BROWSER" \\
         --user-data-dir="\$PROFILE" \\
         --app="\$URL" \\
         --window-size=393,852 \\
@@ -874,23 +901,48 @@ EOF
 
     # Open browser.
     #
-    # rc34 fix: previously this used `open <url>` which hands off to the
-    # default URL handler (your existing Chrome profile) and opens a
-    # plain tab in your already-running browser — defeating the whole
-    # point of the chromeless 393x852 phone-sized launcher we just
-    # baked into ~/Desktop/NullWire.app.  On macOS we now invoke the
-    # exact same Chrome --app path the desktop launcher uses (with a
-    # NullWire-isolated profile so the window-size flag is honoured),
-    # so the post-install UX matches the desktop-icon UX.  Falls back
-    # to plain `open` if Chrome isn't installed.
+    # rc34 + rc36 multi-browser: previously this used `open <url>` which
+    # hands off to the default URL handler (your existing Chrome profile)
+    # and opens a plain tab in your already-running browser — defeating
+    # the whole point of the chromeless 393x852 phone-sized launcher we
+    # just baked into ~/Desktop/NullWire.app.  On macOS we now walk a
+    # priority list of Chromium-family browsers (all support the same
+    # --app/--user-data-dir/--window-size flags) and invoke the first
+    # installed one with the chromeless setup.  Brave, Edge, Arc,
+    # Vivaldi, and Opera all qualify — a Brave-only user is no longer
+    # forced to install Chrome.  NULLWIRE_BROWSER env overrides the
+    # priority for non-default install locations.  Safari/Firefox-only
+    # users fall through to `open` (regular browser tab); the messenger
+    # UI is mobile-responsive at 393px so they can manually resize.
     log "opening browser..."
     URL="http://127.0.0.1:${NULLWIRE_PORT}"
     if [ "$(uname -s)" = "Darwin" ]; then
-        CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         PROFILE="${NULLWIRE_HOME}/chrome-profile"
-        if [ -x "$CHROME" ]; then
+        CANDIDATES="
+${NULLWIRE_BROWSER:-}
+/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+/Applications/Brave Browser.app/Contents/MacOS/Brave Browser
+/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+/Applications/Arc.app/Contents/MacOS/Arc
+/Applications/Vivaldi.app/Contents/MacOS/Vivaldi
+/Applications/Chromium.app/Contents/MacOS/Chromium
+/Applications/Opera.app/Contents/MacOS/Opera
+"
+        BROWSER=""
+        OLDIFS="$IFS"
+        IFS='
+'
+        for c in $CANDIDATES; do
+            [ -z "$c" ] && continue
+            if [ -x "$c" ]; then
+                BROWSER="$c"
+                break
+            fi
+        done
+        IFS="$OLDIFS"
+        if [ -n "$BROWSER" ]; then
             mkdir -p "$PROFILE"
-            "$CHROME" \
+            "$BROWSER" \
                 --user-data-dir="$PROFILE" \
                 --app="$URL" \
                 --window-size=393,852 \
