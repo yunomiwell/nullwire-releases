@@ -17,6 +17,14 @@
 #   # or as a positional arg:
 #   curl -sSL https://nullwire.xyz/install.sh | bash -s tas
 #
+# Auto-add MULTIPLE contacts (comma-separated, both env-var and magic-link):
+#   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_ADD=tas,kuba,welcome bash
+#   curl -sSL https://nullwire.xyz/i/tas,kuba,welcome | bash
+#
+# Magic-link with own-handle pre-set (path-segment form):
+#   curl -sSL https://nullwire.xyz/i/tas/fogel | bash             # adds @tas, registers as @fogel
+#   curl -sSL https://nullwire.xyz/i/tas,kuba/fogel | bash        # adds 2, registers as @fogel
+#
 # What this does:
 #   1. Detects your platform (macOS/Linux, x86_64/arm64)
 #   2. Downloads the matching nullwire-cli binary from GitHub Releases
@@ -1076,11 +1084,25 @@ EOF
         warn "welcome kick-off failed — you can manually send a 'hi' from the UI"
     fi
 
-    # rc36: optional auto-add of an inviter's handle.  See the
-    # `add_contact_from_chain` helper above for the full protocol.
-    # Best-effort — failures here never abort the install.
+    # rc36: optional auto-add of one OR MANY inviter handles.
+    # NULLWIRE_ADD accepts a comma-separated list:
+    #   NULLWIRE_ADD=tas
+    #   NULLWIRE_ADD=tas,kuba,welcome
+    # Loop is sequential so partial failure (one handle unregistered)
+    # leaves the others intact.  Each iteration is independently best-
+    # effort — see `add_contact_from_chain` above.  Whitespace around
+    # commas is tolerated (paste-from-Notes friendly).
     if [ -n "${NULLWIRE_ADD:-}" ]; then
-        add_contact_from_chain "${NULLWIRE_ADD}"
+        _NW_OLDIFS="$IFS"
+        IFS=','
+        for _nw_h in $NULLWIRE_ADD; do
+            _nw_h="$(printf '%s' "$_nw_h" | tr -d '[:space:]')"
+            if [ -n "$_nw_h" ]; then
+                add_contact_from_chain "$_nw_h"
+            fi
+        done
+        IFS="$_NW_OLDIFS"
+        unset _NW_OLDIFS _nw_h
     fi
 
     # Open browser.
