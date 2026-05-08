@@ -9,6 +9,14 @@
 # Pick your own handle (e.g. @alice — note: env var goes AFTER the pipe):
 #   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_HANDLE=alice bash
 #
+# Auto-add a contact at install time (so a fresh install lands ready to
+# message its inviter — no copy-pasting bundles, no QR scan):
+#   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_ADD=tas bash
+#   # or, equivalently, the magic-link form:
+#   curl -sSL https://nullwire.xyz/i/tas | bash
+#   # or as a positional arg:
+#   curl -sSL https://nullwire.xyz/install.sh | bash -s tas
+#
 # What this does:
 #   1. Detects your platform (macOS/Linux, x86_64/arm64)
 #   2. Downloads the matching nullwire-cli binary from GitHub Releases
@@ -16,7 +24,8 @@
 #   4. Installs to ~/.nullwire/bin/
 #   5. Creates your identity + post-quantum prekey bundle
 #   6. Starts the messenger server on http://127.0.0.1:4310
-#   7. Opens your default browser
+#   7. (optional) Auto-adds the NULLWIRE_ADD handle as a contact
+#   8. Opens your default browser
 #
 # Paranoid install (recommended for first-time users):
 #   curl -sSL https://nullwire.xyz/install.sh -o install.sh
@@ -39,6 +48,15 @@ readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc35}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
+
+# rc36: optional handle to auto-add as a contact after the daemon comes up.
+# Accepts the env var OR a positional first arg ($1) so all three of these
+# invocations work identically:
+#   NULLWIRE_ADD=tas bash      (env var on the bash side of the pipe)
+#   bash -s tas                (positional, e.g. via `... | bash -s tas`)
+#   /i/<handle> magic-link     (Netlify edge function injects NULLWIRE_ADD)
+# `${1:-}` is set-u-safe.  Empty string = skip auto-add (legacy behaviour).
+readonly NULLWIRE_ADD="${NULLWIRE_ADD:-${1:-}}"
 
 # ─────────────────────────────────────────────────────────────────
 # PILOT-PAYER (rc4 v5 split-payer)
@@ -343,6 +361,165 @@ EOF
         *)
             ;;
     esac
+}
+
+# ─────────────────────────────────────────────────────────────────
+# rc36: auto-add a contact after install (NULLWIRE_ADD).
+#
+# Three-step dance against the local daemon's HTTP API:
+#   1. Resolve the handle on chain via the CLI's read-only resolver
+#      (`lookup-user-handle-solana`).  No state-lock conflict with the
+#      running daemon — pure RPC + HTTPS fetch + sha256 verify.
+#   2. POST /api/contacts to create the contact + thread (defaults
+#      mirror the messenger UI's `makeEmptyContactForm` — gw-nbg
+#      ingress + the canonical 5-hop mesh route).
+#   3. POST /api/threads/<id>/import-peer-bundle with the resolved
+#      bundle JSON (same path the AddContactModal's "lookup handle"
+#      tab uses for v3/v4 bundles).
+#
+# Best-effort throughout: any failure (network, parse, conflict on
+# already-existing contact) downgrades to a `warn` and the install
+# completes normally — the user can always add the contact manually
+# from the UI.  Never escalates to `fail` — auto-add is convenience,
+# not a correctness gate.
+#
+# JSON manipulation needs python3 (universally available on macOS
+# 11+ and every modern Linux distro).  If python3 is missing we
+# warn + skip; on those edge-case systems the user can run the
+# follow-up command we print at the end.
+# ─────────────────────────────────────────────────────────────────
+add_contact_from_chain() {
+    local handle="$1"
+    handle="${handle#@}"  # strip leading @ if present
+    if [ -z "$handle" ]; then
+        return 0
+    fi
+
+    # Validate the handle shape locally so we don't waste an RPC call
+    # on a string that the server will 400 anyway.  Mirror the on-chain
+    # register's regex: 1-32 chars, lowercase a-z0-9 + hyphens, must
+    # start + end with alphanumeric.
+    if ! echo "$handle" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'; then
+        warn "NULLWIRE_ADD value '$handle' is not a valid handle (lowercase a-z0-9 + hyphens, 1-32 chars) — skipping auto-add"
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 not found; skipping auto-add of @${handle}.  add manually:"
+        warn "  open the NullWire messenger → Add Contact → Lookup handle → '$handle'"
+        return 0
+    fi
+
+    log "looking up @${handle} on chain to auto-add as a contact..."
+
+    # Step 1: resolve via the CLI (writes the bundle JSON to a file).
+    local bundle_file
+    bundle_file="$(mktemp -t nullwire-add-XXXXXX)" || {
+        warn "could not create temp file for bundle — skipping auto-add"
+        return 0
+    }
+    if ! "$NULLWIRE_HOME/bin/nullwire-cli" lookup-user-handle-solana \
+        --handle "$handle" --out "$bundle_file" >/dev/null 2>&1; then
+        warn "could not resolve @${handle} on chain — skipping auto-add (handle not registered? RPC down?). add manually from the UI."
+        rm -f "$bundle_file"
+        return 0
+    fi
+
+    # Step 2: extract the bundle JSON + build the create-contact body.
+    # The CLI writes the on-chain record JSON containing the parsed
+    # bundle nested under `bundle`.  We need:
+    #   - the inner bundle as a JSON STRING (for the import endpoint's
+    #     bundleJson field), and
+    #   - a contact-create body with default route + gateway.
+    # Print both as two newline-separated JSON objects from one
+    # python3 invocation — single-pass parsing, no temp files.
+    local two_payloads
+    two_payloads="$(python3 - "$bundle_file" "$handle" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        record = json.load(f)
+    handle = sys.argv[2]
+    # The CLI lookup-user-handle-solana writes:
+    #   { handle, ownerPubkeyBase58, version, bundle: {...}, ... }
+    # Accept either nested-bundle shape or already-flat-bundle shape.
+    bundle = record.get("bundle") if isinstance(record.get("bundle"), dict) else record
+    if not isinstance(bundle, dict) or "version" not in bundle or "handle" not in bundle:
+        sys.exit(2)
+    contact_obj = {
+        "handle": handle,
+        "name": "",
+        "recipientGateway": "nullwire-gw-nbg",
+        "recipientMailbox": "",
+        "route": "nullwire-gw-nbg nullwire-l2-us nullwire-l2-va nullwire-l3-sg nullwire-l1-hel"
+    }
+    print(json.dumps(contact_obj))
+    print(json.dumps({"bundleJson": json.dumps(bundle)}))
+except SystemExit:
+    raise
+except Exception:
+    sys.exit(3)
+PYEOF
+)" || {
+        warn "could not parse on-chain record for @${handle} — skipping auto-add. add manually from the UI."
+        rm -f "$bundle_file"
+        return 0
+    }
+    rm -f "$bundle_file"
+
+    local contact_payload bundle_import_payload
+    contact_payload="$(printf '%s\n' "$two_payloads" | sed -n '1p')"
+    bundle_import_payload="$(printf '%s\n' "$two_payloads" | sed -n '2p')"
+
+    if [ -z "$contact_payload" ] || [ -z "$bundle_import_payload" ]; then
+        warn "auto-add: payload split failed — skipping. add @${handle} manually from the UI."
+        return 0
+    fi
+
+    # Step 3a: create the contact.
+    local create_resp
+    create_resp="$(curl -fsS --max-time 10 -X POST \
+        -H "Content-Type: application/json" \
+        -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
+        -d "$contact_payload" \
+        "http://127.0.0.1:${NULLWIRE_PORT}/api/contacts" 2>/dev/null)" || {
+        warn "could not create contact for @${handle} (might already exist) — open the UI to verify"
+        return 0
+    }
+
+    # Step 3b: find the new contact's id in the bootstrap response.
+    local contact_id
+    contact_id="$(printf '%s' "$create_resp" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    target = sys.argv[1].lstrip("@").lower()
+    contacts = data.get("contacts") or []
+    for c in contacts:
+        c_handle = (c.get("handle") or "").lstrip("@").lower()
+        if c_handle == target:
+            print(c.get("id", ""))
+            break
+except Exception:
+    sys.exit(1)
+' "$handle" 2>/dev/null)"
+
+    if [ -z "$contact_id" ]; then
+        warn "@${handle} contact created but could not locate its id for bundle import — open the UI to verify"
+        return 0
+    fi
+
+    # Step 3c: import the bundle into the new thread.
+    if curl -fsS --max-time 10 -X POST \
+        -H "Content-Type: application/json" \
+        -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
+        -d "$bundle_import_payload" \
+        "http://127.0.0.1:${NULLWIRE_PORT}/api/threads/${contact_id}/import-peer-bundle" \
+        >/dev/null 2>&1; then
+        ok "auto-added @${handle} as a contact (post-quantum bundle imported from chain)"
+    else
+        warn "@${handle} contact created but bundle import failed — open the UI's Add Contact menu and use Advanced → paste bundle"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -897,6 +1074,13 @@ EOF
         ok "welcome message sent — check the UI for the bot's reply (~10-30s mesh round-trip)"
     else
         warn "welcome kick-off failed — you can manually send a 'hi' from the UI"
+    fi
+
+    # rc36: optional auto-add of an inviter's handle.  See the
+    # `add_contact_from_chain` helper above for the full protocol.
+    # Best-effort — failures here never abort the install.
+    if [ -n "${NULLWIRE_ADD:-}" ]; then
+        add_contact_from_chain "${NULLWIRE_ADD}"
     fi
 
     # Open browser.
