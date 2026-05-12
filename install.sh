@@ -29,8 +29,9 @@
 #   1. Detects your platform (macOS/Linux, x86_64/arm64)
 #   2. Downloads the matching nullwire-cli binary from GitHub Releases
 #   3. Verifies the SHA256 against the offline-signed `releases.json`
-#      manifest (falls back to unsigned `checksums.sha256` if minisign
-#      is unavailable — see "Full verification" below)
+#      when minisign is available, falling back to the GitHub-releases
+#      `checksums.sha256` otherwise (a TLS-only trust root — see
+#      "Full verification" below)
 #   4. Installs to ~/.nullwire/bin/
 #   5. Creates your identity + post-quantum prekey bundle
 #   6. Starts the messenger server on http://127.0.0.1:4310
@@ -58,6 +59,22 @@
 # missing or the manifest does not verify):
 #   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 bash
 #
+# Honest trust-model note (F1 audit):
+#   The signature pubkey is embedded IN this script (the
+#   NULLWIRE_RELEASE_PUBKEY constant).  install.sh itself is fetched
+#   over TLS from nullwire.xyz.  If Netlify or DNS for nullwire.xyz
+#   were compromised, an attacker could publish an install.sh with a
+#   DIFFERENT pubkey baked in AND a manifest signed under that
+#   attacker key, and the verification path inside this script would
+#   pass cleanly.  The signed-manifest path closes the GitHub-releases
+#   admin-account attack vector (which was the C2 P0); it does NOT
+#   close the CDN-takeover vector.
+#   For higher assurance, install minisign separately and verify the
+#   install.sh file's own sha256 against the value published on the
+#   public GitHub release page at
+#   https://github.com/yunomiwell/nullwire-releases/releases — that
+#   surface is operationally independent from Netlify + DNS.
+#
 # Uninstall:
 #   ~/.nullwire/bin/nullwire-cli uninstall
 #   # or manually:  rm -rf ~/.nullwire
@@ -70,7 +87,7 @@ set -euo pipefail
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
 readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc40}"
-readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
+readonly NULLWIRE_RELEASES_BASE="${NULLWIRE_RELEASES_BASE:-https://github.com/yunomiwell/nullwire-releases/releases/download}"
 
 # C2 (red-team rc37): the cold-install path used to trust the UNSIGNED
 # `checksums.sha256` file shipped alongside the GitHub release.  An
@@ -81,9 +98,27 @@ readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases
 # Pubkey matches the offline minisign key whose `public.key` lives in
 # the nullwire-core repo and whose value is baked into rc29+ binaries
 # at build time via the NULLWIRE_RELEASE_PUBKEY env var.
-readonly NULLWIRE_RELEASE_PUBKEY="RWTyt2chT6zEFvcqNZ8A0LhwmwEqYdfFeLYN0Yj3h3LiVXOZJVFcAyM7"
+readonly NULLWIRE_RELEASE_PUBKEY="${NULLWIRE_RELEASE_PUBKEY:-RWTyt2chT6zEFvcqNZ8A0LhwmwEqYdfFeLYN0Yj3h3LiVXOZJVFcAyM7}"
 readonly NULLWIRE_MANIFEST_URL="${NULLWIRE_MANIFEST_URL:-https://nullwire.xyz/releases.json}"
 readonly NULLWIRE_MANIFEST_SIG_URL="${NULLWIRE_MANIFEST_SIG_URL:-https://nullwire.xyz/releases.json.minisig}"
+
+# F6 (audit): both manifest URLs MUST be https://.  An http:// override
+# would let a network attacker swap the manifest in transit — defeats
+# the whole point of the signed-manifest path.  Loopback http:// is
+# permitted (http://127.0.0.1:* / http://localhost:*) because it can
+# only be reached by the test driver running on the same host — an
+# off-host attacker cannot redirect production install.sh to loopback.
+_nw_assert_manifest_url_safe() {
+    local var_name="$1" url="$2"
+    case "$url" in
+        https://*) return 0 ;;
+        http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*) return 0 ;;
+        *) echo "✗ $var_name must be https:// (or http://127.0.0.1/localhost for local tests). Got: $url" >&2; exit 1 ;;
+    esac
+}
+_nw_assert_manifest_url_safe NULLWIRE_MANIFEST_URL "$NULLWIRE_MANIFEST_URL"
+_nw_assert_manifest_url_safe NULLWIRE_MANIFEST_SIG_URL "$NULLWIRE_MANIFEST_SIG_URL"
+unset -f _nw_assert_manifest_url_safe
 
 # Paranoid mode: if set to 1, the install REFUSES to proceed when
 # minisign is unavailable OR when manifest verification fails.  Default
@@ -91,6 +126,15 @@ readonly NULLWIRE_MANIFEST_SIG_URL="${NULLWIRE_MANIFEST_SIG_URL:-https://nullwir
 # without a minisign package (warns loudly instead).  Set to 1 for
 # air-gap / production / supply-chain-conscious installs.
 readonly NULLWIRE_REQUIRE_SIGNED_MANIFEST="${NULLWIRE_REQUIRE_SIGNED_MANIFEST:-0}"
+
+# F5 audit: integration-test dry-run.  When set to 1, install.sh exits
+# 0 immediately after the manifest-verification + cli_hash decision
+# (BEFORE any binary download or filesystem mutation outside /tmp).
+# Used by `nullwire_messenger/scripts/c2-tests/test-verify-manifest.sh`
+# integration mode to exercise the real install.sh main() flow without
+# actually installing anything.  No production user should ever set
+# this.
+readonly NULLWIRE_INSTALL_DRYRUN="${NULLWIRE_INSTALL_DRYRUN:-0}"
 
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
@@ -213,6 +257,12 @@ check_deps() {
     require_cmd curl
     require_cmd shasum
     require_cmd uname
+    # F11 (audit): parse_sha256_from_manifest uses python3 to walk the
+    # signed-manifest JSON.  Already de-facto required by the rc36
+    # NULLWIRE_ADD handle-add flow further down, but make the
+    # dependency explicit at startup so a missing python3 fails fast
+    # with a clear error rather than mid-install.
+    require_cmd python3
 
     # v0.1.3+: messenger is a single Rust binary with the UI bundled via
     # include_dir!. No Node.js, no separate UI tarball, no extraction step.
@@ -251,6 +301,14 @@ verify_sha256() {
 # from this script yet — these are pure helpers.
 # ─────────────────────────────────────────────────────────────────
 have_minisign() {
+    # NULLWIRE_FORCE_NO_MINISIGN=1 forces this to return false even when
+    # minisign IS on PATH.  Test-only knob used by the c2-tests
+    # integration driver to exercise the no-minisign branches (G+H)
+    # without uninstalling minisign from the test host.  Production
+    # users have no reason to set this.
+    if [ "${NULLWIRE_FORCE_NO_MINISIGN:-0}" = "1" ]; then
+        return 1
+    fi
     command -v minisign >/dev/null 2>&1
 }
 
@@ -258,10 +316,18 @@ fetch_signed_manifest() {
     local manifest_out="$1" sig_out="$2"
     log "fetching signed manifest..."
     if ! curl -sSL --fail --max-time 30 "$NULLWIRE_MANIFEST_URL" -o "$manifest_out"; then
+        # No manifest reachable at all — CDN outage, pre-release state,
+        # genuine network failure.  Soft-fallback territory; caller
+        # decides what that means under strict mode.
         return 1
     fi
     if ! curl -sSL --fail --max-time 30 "$NULLWIRE_MANIFEST_SIG_URL" -o "$sig_out"; then
-        return 1
+        # F2 (audit): manifest IS reachable but signature is NOT.  This
+        # is the downgrade-attack shape — an attacker who can rewrite
+        # the CDN could serve a tampered manifest while removing the
+        # signature, forcing the no-signed-path branch.  Distinct rc=2
+        # so caller can hard-fail regardless of strict mode.
+        return 2
     fi
     return 0
 }
@@ -278,19 +344,24 @@ verify_signed_manifest() {
 
 parse_sha256_from_manifest() {
     local manifest="$1" platform="$2"
+    # F3/F4/F10 (audit): strict hex validation via re.fullmatch
+    # (length-only check let a non-hex string slip through previously),
+    # plus TypeError in the except tuple to catch a non-string sha
+    # (e.g. {"sha256": null} or {"sha256": 42}) — KeyError alone would
+    # let those through to .lower() and surface as an unhelpful crash.
     python3 -c '
-import json, sys
+import json, re, sys
 manifest_path = sys.argv[1]
 platform = sys.argv[2]
 try:
     with open(manifest_path) as f:
         data = json.load(f)
     sha = data["platforms"][platform]["sha256"]
-    if not isinstance(sha, str) or len(sha) != 64:
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
         sys.stderr.write(f"invalid sha256 in manifest for {platform}\n")
         sys.exit(1)
     print(sha)
-except (KeyError, json.JSONDecodeError, FileNotFoundError) as e:
+except (KeyError, TypeError, json.JSONDecodeError, FileNotFoundError) as e:
     sys.stderr.write(f"manifest parse error: {e}\n")
     sys.exit(1)
 ' "$manifest" "$platform"
@@ -731,9 +802,16 @@ main() {
     # needed); if it's low, we delete the stale file so the CLI's own
     # ensure_service_fee_wallet fallback path takes over with a fresh
     # per-install keypair.
-    log "checking pilot rent-payer balance (devnet)..."
-    local payer_balance
-    payer_balance="$(pilot_payer_balance_lamports || true)"
+    # F5 (audit): dry-run mode skips the devnet RPC probe — keeps the
+    # c2-tests integration mode hermetic and fast (no off-host calls).
+    if [ "$NULLWIRE_INSTALL_DRYRUN" = "1" ]; then
+        log "dry-run: skipping pilot rent-payer balance check"
+        local payer_balance=""
+    else
+        log "checking pilot rent-payer balance (devnet)..."
+        local payer_balance
+        payer_balance="$(pilot_payer_balance_lamports || true)"
+    fi
     if [ -n "$payer_balance" ] && [ "$payer_balance" -lt "$MIN_PILOT_PAYER_LAMPORTS" ] 2>/dev/null; then
         warn "pilot rent-payer is low (${payer_balance} lamports < ${MIN_PILOT_PAYER_LAMPORTS}); falling back to per-install devnet airdrop."
         warn "if registration fails with rate-limit, retry in a few minutes — funds are being topped up."
@@ -812,25 +890,47 @@ main() {
     local cli_hash=""
     local used_signed_manifest=0
     if have_minisign; then
-        if fetch_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig"; then
-            if verify_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig" "$NULLWIRE_RELEASE_PUBKEY"; then
-                cli_hash="$(parse_sha256_from_manifest "$tmp_dir/releases.json" "$platform" 2>/dev/null || true)"
-                if [ -n "$cli_hash" ]; then
-                    ok "signed manifest verified — using sha256 from manifest"
-                    used_signed_manifest=1
+        # F2 (audit): fetch_signed_manifest distinguishes
+        #   0 = both fetched OK
+        #   1 = neither (or just manifest) reachable — soft fallback eligible
+        #   2 = manifest reachable but sig MISSING — downgrade attack, hard fail
+        local fetch_rc=0
+        fetch_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig" || fetch_rc=$?
+        case "$fetch_rc" in
+            0)
+                if verify_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig" "$NULLWIRE_RELEASE_PUBKEY"; then
+                    cli_hash="$(parse_sha256_from_manifest "$tmp_dir/releases.json" "$platform" 2>/dev/null || true)"
+                    if [ -n "$cli_hash" ]; then
+                        ok "signed manifest verified — using sha256 from manifest"
+                        used_signed_manifest=1
+                    else
+                        fail "manifest verified but missing sha256 entry for platform $platform — installer/manifest version mismatch."
+                    fi
                 else
-                    fail "manifest verified but missing sha256 entry for platform $platform — installer/manifest version mismatch."
-                fi
-            else
-                fail "manifest signature INVALID — refusing to install.
+                    fail "manifest signature INVALID — refusing to install.
     The signed release manifest at $NULLWIRE_MANIFEST_URL did not verify
     against the embedded pubkey ($NULLWIRE_RELEASE_PUBKEY).
     Either the manifest was tampered with or the release key rotated.
     Do NOT proceed.  Report at https://github.com/yunomiwell/nullwire-releases/issues"
-            fi
-        else
-            warn "could not fetch signed manifest from $NULLWIRE_MANIFEST_URL — falling back to TLS+sha256"
-        fi
+                fi
+                ;;
+            2)
+                # F2 (audit): manifest fetched, signature missing.
+                # ALWAYS hard-fail — irrespective of NULLWIRE_REQUIRE_SIGNED_MANIFEST.
+                # A legitimate release publishes both files atomically;
+                # serving manifest without its signature is the
+                # downgrade-attack shape, never a transient.
+                fail "DOWNGRADE ATTACK DETECTED: manifest available at $NULLWIRE_MANIFEST_URL
+    but signature missing at $NULLWIRE_MANIFEST_SIG_URL.
+    A legitimate release publishes both files atomically.  Refusing to install.
+    Report at https://github.com/yunomiwell/nullwire-releases/issues"
+                ;;
+            *)
+                # rc=1 (or anything else): neither file reachable.
+                # Soft fallback unless strict mode is on.
+                warn "could not fetch signed manifest from $NULLWIRE_MANIFEST_URL — falling back to TLS+sha256"
+                ;;
+        esac
     fi
 
     if [ "$used_signed_manifest" = "0" ]; then
@@ -862,6 +962,24 @@ main() {
         fi
     fi
 
+    # F5 (audit): integration-test dry-run.  Exit BEFORE downloading the
+    # CLI binary, BEFORE touching $NULLWIRE_HOME, BEFORE launchd/systemd
+    # setup.  All verification gates have already run by this point —
+    # exit 0 means "would have installed", exit non-zero means an
+    # earlier gate already aborted.  Used by the c2-tests integration
+    # mode; production users have no reason to set this.
+    if [ "$NULLWIRE_INSTALL_DRYRUN" = "1" ]; then
+        ok "dry-run: verification gates passed (used_signed_manifest=$used_signed_manifest, cli_hash=$cli_hash)"
+        exit 0
+    fi
+
+    # F8 (audit): tray binary is verified against the UNSIGNED
+    # checksums.sha256, not the signed manifest.  Schema v1 manifest
+    # carries CLI sha256 only.  Tray supply-chain hardening via schema
+    # v2 manifest is rc42+ work — tray is optional + fail-soft + UI-only
+    # surface, so the asymmetric trust model is acceptable for now.
+    # See RC41_C2_AUDIT.md F8.
+    #
     # rc28: extract the tray-binary hash if the release ships one. We treat
     # the tray as OPTIONAL: a release without a tray asset (older versions,
     # or a partial release rebuild) installs cleanly minus the menubar
