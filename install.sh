@@ -59,10 +59,12 @@
 # missing or the manifest does not verify):
 #   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 bash
 #
-# Honest trust-model note (F1 audit):
+# Honest trust-model note (F1 audit; refined round 2):
 #   The signature pubkey is embedded IN this script (the
 #   NULLWIRE_RELEASE_PUBKEY constant).  install.sh itself is fetched
-#   over TLS from nullwire.xyz.  If Netlify or DNS for nullwire.xyz
+#   over TLS from nullwire.xyz, which today is Cloudflare-fronted in
+#   front of a Netlify-hosted origin.  If ANY link in that chain —
+#   Cloudflare account, Netlify account, or the DNS for nullwire.xyz —
 #   were compromised, an attacker could publish an install.sh with a
 #   DIFFERENT pubkey baked in AND a manifest signed under that
 #   attacker key, and the verification path inside this script would
@@ -134,6 +136,22 @@ readonly NULLWIRE_REQUIRE_SIGNED_MANIFEST="${NULLWIRE_REQUIRE_SIGNED_MANIFEST:-0
 # integration mode to exercise the real install.sh main() flow without
 # actually installing anything.  No production user should ever set
 # this.
+#
+# Round-2 audit threat model:
+#   Attacker sets NULLWIRE_INSTALL_DRYRUN=1 in a victim's env so that
+#   `curl install.sh | bash` exits 0 without ever installing the binary.
+#   Impact: DENIAL OF SERVICE only — victim sees a successful-looking
+#   install but `~/.nullwire/bin/nullwire-cli` is never created.  No
+#   privilege escalation, no malicious code execution.
+#   Pre-conditions: attacker must already have env-write access to the
+#   victim's shell (compromised .bashrc, CI-secret injection, malicious
+#   wrapper script).  Any party with env-write access can already cause
+#   much worse damage than triggering an early exit — DRYRUN is bounded
+#   by what they could otherwise do directly.
+#   The Netlify edge function at /i/<handle> CANNOT set arbitrary env
+#   vars on the receiving bash side — it only controls the positional
+#   $1 (which install.sh treats as NULLWIRE_ADD).  So a magic-link URL
+#   cannot weaponize DRYRUN.  Verdict: low-severity DoS only.
 readonly NULLWIRE_INSTALL_DRYRUN="${NULLWIRE_INSTALL_DRYRUN:-0}"
 
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
