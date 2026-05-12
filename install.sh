@@ -54,6 +54,27 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc40}"
 readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
+
+# C2 (red-team rc37): the cold-install path used to trust the UNSIGNED
+# `checksums.sha256` file shipped alongside the GitHub release.  An
+# attacker with releases-admin access could swap both the manifest and
+# the binary atomically and the install would verify cleanly.  rc41+
+# consumes the SIGNED `releases.json` manifest from the canonical CDN
+# instead and verifies it with this pubkey before extracting any sha256.
+# Pubkey matches the offline minisign key whose `public.key` lives in
+# the nullwire-core repo and whose value is baked into rc29+ binaries
+# at build time via the NULLWIRE_RELEASE_PUBKEY env var.
+readonly NULLWIRE_RELEASE_PUBKEY="RWTyt2chT6zEFvcqNZ8A0LhwmwEqYdfFeLYN0Yj3h3LiVXOZJVFcAyM7"
+readonly NULLWIRE_MANIFEST_URL="${NULLWIRE_MANIFEST_URL:-https://nullwire.xyz/releases.json}"
+readonly NULLWIRE_MANIFEST_SIG_URL="${NULLWIRE_MANIFEST_SIG_URL:-https://nullwire.xyz/releases.json.minisig}"
+
+# Paranoid mode: if set to 1, the install REFUSES to proceed when
+# minisign is unavailable OR when manifest verification fails.  Default
+# off so the public `curl install.sh | bash` path still works on systems
+# without a minisign package (warns loudly instead).  Set to 1 for
+# air-gap / production / supply-chain-conscious installs.
+readonly NULLWIRE_REQUIRE_SIGNED_MANIFEST="${NULLWIRE_REQUIRE_SIGNED_MANIFEST:-0}"
+
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
 
