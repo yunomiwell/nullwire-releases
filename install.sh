@@ -776,7 +776,12 @@ main() {
     local tray_asset="nullwire-tray-${platform}"
     local checksums_url="${base_url}/checksums.sha256"
 
-    # Fetch checksums manifest first — it's small, signed, and drives verification
+    # rc41 C2: prefer the offline-signed `releases.json` manifest as
+    # the source of truth for the CLI binary sha256.  Fall back to the
+    # unsigned `checksums.sha256` only if minisign is unavailable or
+    # the manifest cannot be fetched.  HARD-FAIL if a manifest IS
+    # fetched AND minisign IS present AND the signature does not verify
+    # — that is an attack signal, not a transient.
     local tmp_dir
     tmp_dir="$(mktemp -d)"
     # Bake the resolved path into the trap NOW (double-quoted) so the
@@ -787,15 +792,57 @@ main() {
     # "unbound variable" error users saw at the very end of install.
     trap "rm -rf '$tmp_dir'" EXIT
 
+    local cli_hash=""
+    local used_signed_manifest=0
+    if have_minisign; then
+        if fetch_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig"; then
+            if verify_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig" "$NULLWIRE_RELEASE_PUBKEY"; then
+                cli_hash="$(parse_sha256_from_manifest "$tmp_dir/releases.json" "$platform" 2>/dev/null || true)"
+                if [ -n "$cli_hash" ]; then
+                    ok "signed manifest verified — using sha256 from manifest"
+                    used_signed_manifest=1
+                else
+                    fail "manifest verified but missing sha256 entry for platform $platform — installer/manifest version mismatch."
+                fi
+            else
+                fail "manifest signature INVALID — refusing to install.
+    The signed release manifest at $NULLWIRE_MANIFEST_URL did not verify
+    against the embedded pubkey ($NULLWIRE_RELEASE_PUBKEY).
+    Either the manifest was tampered with or the release key rotated.
+    Do NOT proceed.  Report at https://github.com/yunomiwell/nullwire-releases/issues"
+            fi
+        else
+            warn "could not fetch signed manifest from $NULLWIRE_MANIFEST_URL — falling back to TLS+sha256"
+        fi
+    fi
+
+    if [ "$used_signed_manifest" = "0" ]; then
+        if [ "$NULLWIRE_REQUIRE_SIGNED_MANIFEST" = "1" ]; then
+            if ! have_minisign; then
+                fail "NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 set but minisign not installed.
+    Refusing to proceed.  Install minisign and re-run:
+        brew install minisign        (macOS)
+        apt install minisign         (Debian/Ubuntu)
+        pkg install minisign         (FreeBSD)"
+            else
+                fail "NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 set but signed manifest is unavailable.
+    Check connectivity to $NULLWIRE_MANIFEST_URL and re-run."
+            fi
+        fi
+        warn "⚠️  WARNING: signature verification OFF. Install minisign for full first-install verification. Falling back to TLS+sha256 only."
+    fi
+
+    # Always fetch checksums.sha256: signed-manifest path uses it only
+    # for the OPTIONAL tray binary hash (manifest schema v1 does not
+    # ship tray hashes).  Fallback path uses it for CLI hash too.
     download "$checksums_url" "$tmp_dir/checksums.sha256"
 
-    # Extract expected hash for the CLI binary.
-    local cli_hash
-    cli_hash="$(grep " $cli_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}')"
-
-    if [ -z "$cli_hash" ]; then
-        fail "could not find expected checksum entries for platform $platform
+    if [ "$used_signed_manifest" = "0" ]; then
+        cli_hash="$(grep " $cli_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}')"
+        if [ -z "$cli_hash" ]; then
+            fail "could not find expected checksum entries for platform $platform
     This version of the installer may not match the release."
+        fi
     fi
 
     # rc28: extract the tray-binary hash if the release ships one. We treat
