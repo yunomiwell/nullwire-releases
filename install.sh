@@ -83,6 +83,30 @@
 #
 # https://nullwire.xyz  |  https://github.com/yunomiwell/nullwire-releases
 
+# Round-3 audit (HIGH): reject `source install.sh` / `. install.sh`.
+# This script is a top-level installer, not a library.  Without this
+# guard, sourcing has THREE bad effects:
+#   (1) the caller's shell gets polluted with our helpers
+#       (have_minisign, fetch_*, verify_*, parse_*, log/ok/warn/fail,
+#       detect_platform, install_messenger, ...).
+#   (2) our `trap '...' EXIT` registers in the caller's shell, so any
+#       later exit triggers our cleanup against THEIR tmp_dirs.
+#   (3) — critically — the side-effecting startup runs against the
+#       caller's $HOME/.nullwire.  Round-3 testing confirmed sourcing
+#       attempts a full install (downloads rc40, registers launchd
+#       plist, restarts the daemon), with risk of overwriting an
+#       existing identity if NULLWIRE_HOME wasn't already populated.
+# The `(return 0 2>/dev/null)` idiom: `return` is only valid in a
+# sourced context; in a subshell it succeeds iff we're being sourced.
+# The redirect suppresses bash's "can only `return' from a function or
+# sourced script" complaint when we're executed normally.
+if (return 0 2>/dev/null); then
+    printf '\033[38;5;199m✗\033[0m install.sh must be EXECUTED, not sourced.\n' >&2
+    printf '  use:    bash install.sh\n' >&2
+    printf '  not:    source install.sh   (or `. install.sh`)\n' >&2
+    return 1
+fi
+
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────
