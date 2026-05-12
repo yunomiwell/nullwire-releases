@@ -229,6 +229,57 @@ verify_sha256() {
 }
 
 # ─────────────────────────────────────────────────────────────────
+# C2 — Signed manifest verification helpers (Phase 2)
+# Phase 3 wires these into the cold-install flow.  No call sites
+# from this script yet — these are pure helpers.
+# ─────────────────────────────────────────────────────────────────
+have_minisign() {
+    command -v minisign >/dev/null 2>&1
+}
+
+fetch_signed_manifest() {
+    local manifest_out="$1" sig_out="$2"
+    log "fetching signed manifest..."
+    if ! curl -sSL --fail --max-time 30 "$NULLWIRE_MANIFEST_URL" -o "$manifest_out"; then
+        return 1
+    fi
+    if ! curl -sSL --fail --max-time 30 "$NULLWIRE_MANIFEST_SIG_URL" -o "$sig_out"; then
+        return 1
+    fi
+    return 0
+}
+
+verify_signed_manifest() {
+    local manifest="$1" sig="$2" pubkey="$3"
+    if ! command -v minisign >/dev/null 2>&1; then
+        return 1
+    fi
+    minisign -Vm "$manifest" -x "$sig" \
+        -p <(printf 'untrusted comment: nullwire release\n%s\n' "$pubkey") \
+        >/dev/null 2>&1
+}
+
+parse_sha256_from_manifest() {
+    local manifest="$1" platform="$2"
+    python3 -c '
+import json, sys
+manifest_path = sys.argv[1]
+platform = sys.argv[2]
+try:
+    with open(manifest_path) as f:
+        data = json.load(f)
+    sha = data["platforms"][platform]["sha256"]
+    if not isinstance(sha, str) or len(sha) != 64:
+        sys.stderr.write(f"invalid sha256 in manifest for {platform}\n")
+        sys.exit(1)
+    print(sha)
+except (KeyError, json.JSONDecodeError, FileNotFoundError) as e:
+    sys.stderr.write(f"manifest parse error: {e}\n")
+    sys.exit(1)
+' "$manifest" "$platform"
+}
+
+# ─────────────────────────────────────────────────────────────────
 # rc30: install a Desktop launcher icon.
 #
 # macOS  → ~/Desktop/NullWire.app  (proper .app bundle with .icns)
