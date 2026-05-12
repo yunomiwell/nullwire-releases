@@ -28,7 +28,9 @@
 # What this does:
 #   1. Detects your platform (macOS/Linux, x86_64/arm64)
 #   2. Downloads the matching nullwire-cli binary from GitHub Releases
-#   3. Verifies the SHA256 checksum before doing anything with it
+#   3. Verifies the SHA256 against the offline-signed `releases.json`
+#      manifest (falls back to unsigned `checksums.sha256` if minisign
+#      is unavailable — see "Full verification" below)
 #   4. Installs to ~/.nullwire/bin/
 #   5. Creates your identity + post-quantum prekey bundle
 #   6. Starts the messenger server on http://127.0.0.1:4310
@@ -40,6 +42,21 @@
 #   cat install.sh                           # read it
 #   shasum -a 256 install.sh                 # compare to hash on nullwire.xyz
 #   bash install.sh
+#
+# Full verification (rc41+, recommended): install minisign first.
+#   brew install minisign        (macOS)
+#   apt install minisign         (Debian/Ubuntu)
+#   pkg install minisign         (FreeBSD)
+# install.sh auto-detects minisign and uses it to verify the signed
+# manifest at https://nullwire.xyz/releases.json.minisig before
+# downloading any binary.  Without minisign, install.sh falls back to
+# a TLS+sha256-only path (rc40 era — still safe under TLS but loses
+# the offline-signature guarantee against a compromised GitHub-releases
+# account).
+#
+# To REQUIRE signature verification (refuse install if minisign is
+# missing or the manifest does not verify):
+#   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 bash
 #
 # Uninstall:
 #   ~/.nullwire/bin/nullwire-cli uninstall
