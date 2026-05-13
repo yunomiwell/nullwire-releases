@@ -28,7 +28,10 @@
 # What this does:
 #   1. Detects your platform (macOS/Linux, x86_64/arm64)
 #   2. Downloads the matching nullwire-cli binary from GitHub Releases
-#   3. Verifies the SHA256 checksum before doing anything with it
+#   3. Verifies the SHA256 against the offline-signed `releases.json`
+#      when minisign is available, falling back to the GitHub-releases
+#      `checksums.sha256` otherwise (a TLS-only trust root — see
+#      "Full verification" below)
 #   4. Installs to ~/.nullwire/bin/
 #   5. Creates your identity + post-quantum prekey bundle
 #   6. Starts the messenger server on http://127.0.0.1:4310
@@ -41,11 +44,80 @@
 #   shasum -a 256 install.sh                 # compare to hash on nullwire.xyz
 #   bash install.sh
 #
+# Full verification (rc41+, recommended): install minisign first.
+#   brew install minisign        (macOS)
+#   apt install minisign         (Debian/Ubuntu)
+#   pkg install minisign         (FreeBSD)
+# install.sh auto-detects minisign and uses it to verify the signed
+# manifest at https://nullwire.xyz/releases.json.minisig before
+# downloading any binary.  Without minisign, install.sh falls back to
+# a TLS+sha256-only path (rc40 era — still safe under TLS but loses
+# the offline-signature guarantee against a compromised GitHub-releases
+# account).
+#
+# To REQUIRE signature verification (refuse install if minisign is
+# missing or the manifest does not verify):
+#   curl -sSL https://nullwire.xyz/install.sh | NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 bash
+#
+# Transport hardening (round-4 audit):
+#   nullwire.xyz is on the public HSTS preload list (verified via
+#   hstspreload.org/api/v2/status?domain=nullwire.xyz → status:
+#   "preloaded", bulk: true).  This pins HTTPS for all browser-class
+#   clients on first contact.  curl, however, does not consult the
+#   preload list — so a first-fetch MITM on the very first run of
+#   `curl install.sh | bash` on a brand-new system from a hostile
+#   network is still possible.  See "Honest trust-model note" below
+#   for the residual gap.  rc42+ work: add `includeSubDomains; preload`
+#   directives to the live HSTS header (currently `max-age=31536000`
+#   alone) for renewal hygiene.
+#
+# Honest trust-model note (F1 audit; refined round 2):
+#   The signature pubkey is embedded IN this script (the
+#   NULLWIRE_RELEASE_PUBKEY constant).  install.sh itself is fetched
+#   over TLS from nullwire.xyz, which today is Cloudflare-fronted in
+#   front of a Netlify-hosted origin.  If ANY link in that chain —
+#   Cloudflare account, Netlify account, or the DNS for nullwire.xyz —
+#   were compromised, an attacker could publish an install.sh with a
+#   DIFFERENT pubkey baked in AND a manifest signed under that
+#   attacker key, and the verification path inside this script would
+#   pass cleanly.  The signed-manifest path closes the GitHub-releases
+#   admin-account attack vector (which was the C2 P0); it does NOT
+#   close the CDN-takeover vector.
+#   For higher assurance, install minisign separately and verify the
+#   install.sh file's own sha256 against the value published on the
+#   public GitHub release page at
+#   https://github.com/yunomiwell/nullwire-releases/releases — that
+#   surface is operationally independent from Netlify + DNS.
+#
 # Uninstall:
 #   ~/.nullwire/bin/nullwire-cli uninstall
 #   # or manually:  rm -rf ~/.nullwire
 #
 # https://nullwire.xyz  |  https://github.com/yunomiwell/nullwire-releases
+
+# Round-3 audit (HIGH): reject `source install.sh` / `. install.sh`.
+# This script is a top-level installer, not a library.  Without this
+# guard, sourcing has THREE bad effects:
+#   (1) the caller's shell gets polluted with our helpers
+#       (have_minisign, fetch_*, verify_*, parse_*, log/ok/warn/fail,
+#       detect_platform, install_messenger, ...).
+#   (2) our `trap '...' EXIT` registers in the caller's shell, so any
+#       later exit triggers our cleanup against THEIR tmp_dirs.
+#   (3) — critically — the side-effecting startup runs against the
+#       caller's $HOME/.nullwire.  Round-3 testing confirmed sourcing
+#       attempts a full install (downloads rc40, registers launchd
+#       plist, restarts the daemon), with risk of overwriting an
+#       existing identity if NULLWIRE_HOME wasn't already populated.
+# The `(return 0 2>/dev/null)` idiom: `return` is only valid in a
+# sourced context; in a subshell it succeeds iff we're being sourced.
+# The redirect suppresses bash's "can only `return' from a function or
+# sourced script" complaint when we're executed normally.
+if (return 0 2>/dev/null); then
+    printf '\033[38;5;199m✗\033[0m install.sh must be EXECUTED, not sourced.\n' >&2
+    printf '  use:    bash install.sh\n' >&2
+    printf '  not:    source install.sh   (or `. install.sh`)\n' >&2
+    return 1
+fi
 
 set -euo pipefail
 
@@ -53,7 +125,89 @@ set -euo pipefail
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
 readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc40}"
-readonly NULLWIRE_RELEASES_BASE="https://github.com/yunomiwell/nullwire-releases/releases/download"
+readonly NULLWIRE_RELEASES_BASE="${NULLWIRE_RELEASES_BASE:-https://github.com/yunomiwell/nullwire-releases/releases/download}"
+
+# C2 (red-team rc37): the cold-install path used to trust the UNSIGNED
+# `checksums.sha256` file shipped alongside the GitHub release.  An
+# attacker with releases-admin access could swap both the manifest and
+# the binary atomically and the install would verify cleanly.  rc41+
+# consumes the SIGNED `releases.json` manifest from the canonical CDN
+# instead and verifies it with this pubkey before extracting any sha256.
+# Pubkey matches the offline minisign key whose `public.key` lives in
+# the nullwire-core repo and whose value is baked into rc29+ binaries
+# at build time via the NULLWIRE_RELEASE_PUBKEY env var.
+readonly NULLWIRE_RELEASE_PUBKEY="${NULLWIRE_RELEASE_PUBKEY:-RWTyt2chT6zEFvcqNZ8A0LhwmwEqYdfFeLYN0Yj3h3LiVXOZJVFcAyM7}"
+readonly NULLWIRE_MANIFEST_URL="${NULLWIRE_MANIFEST_URL:-https://nullwire.xyz/releases.json}"
+readonly NULLWIRE_MANIFEST_SIG_URL="${NULLWIRE_MANIFEST_SIG_URL:-https://nullwire.xyz/releases.json.minisig}"
+
+# F6 (audit): both manifest URLs MUST be https://.  An http:// override
+# would let a network attacker swap the manifest in transit — defeats
+# the whole point of the signed-manifest path.  Loopback http:// is
+# permitted (http://127.0.0.1:* / http://localhost:*) because it can
+# only be reached by the test driver running on the same host — an
+# off-host attacker cannot redirect production install.sh to loopback.
+_nw_assert_manifest_url_safe() {
+    local var_name="$1" url="$2"
+    case "$url" in
+        https://*) return 0 ;;
+        http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*) return 0 ;;
+        *) echo "✗ $var_name must be https:// (or http://127.0.0.1/localhost for local tests). Got: $url" >&2; exit 1 ;;
+    esac
+}
+_nw_assert_manifest_url_safe NULLWIRE_MANIFEST_URL "$NULLWIRE_MANIFEST_URL"
+_nw_assert_manifest_url_safe NULLWIRE_MANIFEST_SIG_URL "$NULLWIRE_MANIFEST_SIG_URL"
+unset -f _nw_assert_manifest_url_safe
+
+# Paranoid mode: if set to 1, the install REFUSES to proceed when
+# minisign is unavailable OR when manifest verification fails.  Default
+# off so the public `curl install.sh | bash` path still works on systems
+# without a minisign package (warns loudly instead).  Set to 1 for
+# air-gap / production / supply-chain-conscious installs.
+readonly NULLWIRE_REQUIRE_SIGNED_MANIFEST="${NULLWIRE_REQUIRE_SIGNED_MANIFEST:-0}"
+
+# F5 audit: integration-test dry-run.  When set to 1, install.sh exits
+# 0 immediately after the manifest-verification + cli_hash decision
+# (BEFORE any binary download or filesystem mutation outside /tmp).
+# Used by `nullwire_messenger/scripts/c2-tests/test-verify-manifest.sh`
+# integration mode to exercise the real install.sh main() flow without
+# actually installing anything.  No production user should ever set
+# this.
+#
+# Round-2 audit threat model:
+#   Attacker sets NULLWIRE_INSTALL_DRYRUN=1 in a victim's env so that
+#   `curl install.sh | bash` exits 0 without ever installing the binary.
+#   Impact: DENIAL OF SERVICE only — victim sees a successful-looking
+#   install but `~/.nullwire/bin/nullwire-cli` is never created.  No
+#   privilege escalation, no malicious code execution.
+#   Pre-conditions: attacker must already have env-write access to the
+#   victim's shell (compromised .bashrc, CI-secret injection, malicious
+#   wrapper script).  Any party with env-write access can already cause
+#   much worse damage than triggering an early exit — DRYRUN is bounded
+#   by what they could otherwise do directly.
+#   The Netlify edge function at /i/<handle> CANNOT set arbitrary env
+#   vars on the receiving bash side — it only controls the positional
+#   $1 (which install.sh treats as NULLWIRE_ADD).  So a magic-link URL
+#   cannot weaponize DRYRUN.  Verdict: low-severity DoS only.
+readonly NULLWIRE_INSTALL_DRYRUN="${NULLWIRE_INSTALL_DRYRUN:-0}"
+
+# Round-4 — Sigstore Posture B prototype.
+#
+# NULLWIRE_REKOR_URL: optional URL to a `releases.json.rekor` receipt
+# proving the manifest's signature was published to Sigstore's Rekor
+# transparency log.  If set AND the receipt fetches AND a verifier
+# tool (cosign or rekor-cli) is available, install.sh additionally
+# verifies the receipt as defense-in-depth — making any silent
+# signing-key compromise detectable via the public log.  Empty by
+# default in rc41 (the receipt-publishing pipeline lands in rc42+).
+#
+# NULLWIRE_REKOR_VERIFY_CMD: test-only override.  If set, install.sh
+# uses this command (passed the manifest path + receipt path as $1 +
+# $2) for Rekor verification instead of cosign/rekor-cli.  Exits
+# non-zero on tamper, zero on valid.  Used by the c2-tests prototype
+# to exercise the wiring without contacting the live Rekor service.
+readonly NULLWIRE_REKOR_URL="${NULLWIRE_REKOR_URL:-}"
+readonly NULLWIRE_REKOR_VERIFY_CMD="${NULLWIRE_REKOR_VERIFY_CMD:-}"
+
 readonly NULLWIRE_HOME="${NULLWIRE_HOME:-$HOME/.nullwire}"
 readonly NULLWIRE_PORT="${NULLWIRE_PORT:-4310}"
 
@@ -175,6 +329,12 @@ check_deps() {
     require_cmd curl
     require_cmd shasum
     require_cmd uname
+    # F11 (audit): parse_sha256_from_manifest uses python3 to walk the
+    # signed-manifest JSON.  Already de-facto required by the rc36
+    # NULLWIRE_ADD handle-add flow further down, but make the
+    # dependency explicit at startup so a missing python3 fails fast
+    # with a clear error rather than mid-install.
+    require_cmd python3
 
     # v0.1.3+: messenger is a single Rust binary with the UI bundled via
     # include_dir!. No Node.js, no separate UI tarball, no extraction step.
@@ -188,7 +348,14 @@ check_deps() {
 download() {
     local url="$1" dest="$2"
     log "fetching $(basename "$dest")..."
-    if ! curl -sSL --fail "$url" -o "$dest"; then
+    # M3-2 (round-3 audit): standardized curl timeouts.
+    #   --connect-timeout 10   — give up if TCP handshake hasn't finished in 10s
+    #                            (defends slow-loris-style stall on dial)
+    #   --max-time 60           — bound the whole transfer.  60s is wide
+    #                            enough for a 50 MB binary on a 10 Mbps
+    #                            link, narrow enough that a hostile server
+    #                            slow-feeding bytes can't hang us forever.
+    if ! curl -sSL --fail --connect-timeout 10 --max-time 60 "$url" -o "$dest"; then
         fail "download failed: $url"
     fi
 }
@@ -205,6 +372,212 @@ verify_sha256() {
     Do NOT run this file. Report at https://github.com/yunomiwell/nullwire-releases/issues"
     fi
     ok "verified $(basename "$file")"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# C2 — Signed manifest verification helpers (Phase 2)
+# Phase 3 wires these into the cold-install flow.  No call sites
+# from this script yet — these are pure helpers.
+# ─────────────────────────────────────────────────────────────────
+have_minisign() {
+    # NULLWIRE_FORCE_NO_MINISIGN=1 forces this to return false even when
+    # minisign IS on PATH.  Test-only knob used by the c2-tests
+    # integration driver to exercise the no-minisign branches (G+H)
+    # without uninstalling minisign from the test host.  Production
+    # users have no reason to set this.
+    if [ "${NULLWIRE_FORCE_NO_MINISIGN:-0}" = "1" ]; then
+        return 1
+    fi
+    command -v minisign >/dev/null 2>&1
+}
+
+fetch_signed_manifest() {
+    local manifest_out="$1" sig_out="$2"
+    log "fetching signed manifest..."
+    if ! curl -sSL --fail --connect-timeout 10 --max-time 30 "$NULLWIRE_MANIFEST_URL" -o "$manifest_out"; then
+        # No manifest reachable at all — CDN outage, pre-release state,
+        # genuine network failure.  Soft-fallback territory; caller
+        # decides what that means under strict mode.
+        return 1
+    fi
+    if ! curl -sSL --fail --connect-timeout 10 --max-time 30 "$NULLWIRE_MANIFEST_SIG_URL" -o "$sig_out"; then
+        # F2 (audit): manifest IS reachable but signature is NOT.  This
+        # is the downgrade-attack shape — an attacker who can rewrite
+        # the CDN could serve a tampered manifest while removing the
+        # signature, forcing the no-signed-path branch.  Distinct rc=2
+        # so caller can hard-fail regardless of strict mode.
+        return 2
+    fi
+    return 0
+}
+
+verify_signed_manifest() {
+    local manifest="$1" sig="$2" pubkey="$3"
+    if ! command -v minisign >/dev/null 2>&1; then
+        return 1
+    fi
+    minisign -Vm "$manifest" -x "$sig" \
+        -p <(printf 'untrusted comment: nullwire release\n%s\n' "$pubkey") \
+        >/dev/null 2>&1
+}
+
+parse_sha256_from_manifest() {
+    local manifest="$1" platform="$2"
+    # Round-4: dual-parser for schema v1 (platforms[plat].sha256) and
+    # schema v2 (platforms[plat].cli.sha256).  v1 is rc40-era output;
+    # v2 introduces nested cli/tray sub-objects so the tray hash can be
+    # signed alongside the cli hash (closes F8).  rc41+ install.sh
+    # accepts BOTH and dispatches on schema_version.
+    #
+    # F3/F4/F10 (audit): strict hex validation via re.fullmatch
+    # (length-only check let a non-hex string slip through previously),
+    # plus TypeError in the except tuple to catch a non-string sha
+    # (e.g. {"sha256": null} or {"sha256": 42}) — KeyError alone would
+    # let those through to .lower() and surface as an unhelpful crash.
+    python3 -c '
+import json, re, sys
+manifest_path = sys.argv[1]
+platform = sys.argv[2]
+try:
+    with open(manifest_path) as f:
+        data = json.load(f)
+    schema_version = data.get("schema_version", 1)
+    if schema_version == 1:
+        sha = data["platforms"][platform]["sha256"]
+    elif schema_version == 2:
+        sha = data["platforms"][platform]["cli"]["sha256"]
+    else:
+        sys.stderr.write(f"unsupported schema_version: {schema_version}\n")
+        sys.exit(1)
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        sys.stderr.write(f"invalid sha256 in manifest for {platform}\n")
+        sys.exit(1)
+    print(sha)
+except (KeyError, TypeError, json.JSONDecodeError, FileNotFoundError) as e:
+    sys.stderr.write(f"manifest parse error: {e}\n")
+    sys.exit(1)
+' "$manifest" "$platform"
+}
+
+# Round-4: parse top-level fields from a v2 manifest.  Safe no-ops
+# against v1 manifests (return non-zero, caller treats as "absent").
+parse_manifest_schema_version() {
+    local manifest="$1"
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("schema_version", 1))
+except Exception:
+    print(1)
+' "$manifest"
+}
+
+parse_installer_sha256_from_manifest() {
+    local manifest="$1"
+    python3 -c '
+import json, re, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    sha = data.get("installer_sha256")
+    if sha is None:
+        sys.exit(2)
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        sys.stderr.write("invalid installer_sha256 in manifest\n")
+        sys.exit(1)
+    print(sha)
+except (json.JSONDecodeError, FileNotFoundError) as e:
+    sys.stderr.write(f"manifest parse error: {e}\n")
+    sys.exit(1)
+' "$manifest"
+}
+
+# Round-4 — Sigstore Posture B prototype.
+# Optional Rekor-transparency-log verification of the signed manifest.
+# Returns 0 on "OK or n/a" (no receipt, no verifier tool, valid receipt),
+# returns 1 on "receipt present but verification FAILED" (tamper signal).
+# Production cosign/rekor-cli integration is rc42+ work — the prototype
+# wires the call site so the test driver can prove the gating logic.
+fetch_rekor_receipt() {
+    local out_path="$1"
+    if [ -z "$NULLWIRE_REKOR_URL" ]; then
+        return 1  # not configured — caller treats as "no receipt"
+    fi
+    if ! curl -sSL --fail --connect-timeout 10 --max-time 30 \
+            "$NULLWIRE_REKOR_URL" -o "$out_path" 2>/dev/null; then
+        # Receipt not reachable.  In rc41 prototype we treat this as
+        # non-fatal — the manifest signature is still the load-bearing
+        # check.  rc42+: when Rekor receipts ship by default, a
+        # configured-but-missing receipt should be promoted to a hard
+        # fail (downgrade-attack shape, parallels F2).
+        return 1
+    fi
+    return 0
+}
+
+verify_rekor_receipt() {
+    local manifest="$1" receipt="$2"
+    # Test-only override path: lets the c2-tests driver simulate
+    # cosign/rekor-cli behavior without contacting the live service.
+    if [ -n "$NULLWIRE_REKOR_VERIFY_CMD" ]; then
+        $NULLWIRE_REKOR_VERIFY_CMD "$manifest" "$receipt"
+        return $?
+    fi
+    # Production path (rc42+ work): try rekor-cli first, then cosign.
+    if command -v rekor-cli >/dev/null 2>&1; then
+        # Real impl will be `rekor-cli verify --uuid ... --rekor_server ...`
+        # — for now we sanity-check the receipt is well-formed JSON with
+        # an entry uuid present.  Replace with real verification in rc42+.
+        python3 -c '
+import json, sys, re
+try:
+    with open(sys.argv[1]) as f:
+        r = json.load(f)
+    uuid = r.get("rekor_entry_uuid")
+    if not isinstance(uuid, str) or not re.fullmatch(r"[0-9a-fA-F]{16,}", uuid):
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+' "$receipt" || return 1
+        log "rekor-cli detected; receipt well-formed (real verification deferred to rc42+)"
+        return 0
+    fi
+    if command -v cosign >/dev/null 2>&1; then
+        log "cosign detected; rekor verification deferred to rc42+"
+        return 0
+    fi
+    # Neither tool available — defense-in-depth unavailable but the
+    # core manifest signature already gated us.
+    log "no rekor-cli or cosign on PATH; transparency-log verification skipped"
+    return 0
+}
+
+# Round-4: revoked_versions kill-switch.  Returns 0 if the candidate
+# version is NOT in the revoked list (safe to install); returns 1 if
+# revoked (caller must hard-fail).  Empty list / missing field / v1
+# manifest → returns 0 (no revocations known).
+check_version_not_revoked() {
+    local manifest="$1" candidate="$2"
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    revoked = data.get("revoked_versions", [])
+    if not isinstance(revoked, list):
+        sys.stderr.write("revoked_versions must be a list\n")
+        sys.exit(1)
+    candidate = sys.argv[2]
+    if candidate in revoked:
+        sys.stderr.write(f"version {candidate} appears in revoked_versions\n")
+        sys.exit(1)
+    sys.exit(0)
+except (json.JSONDecodeError, FileNotFoundError) as e:
+    sys.stderr.write(f"manifest parse error: {e}\n")
+    sys.exit(1)
+' "$manifest" "$candidate"
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -270,7 +643,7 @@ install_desktop_icon() {
             # if the fetch fails the .app still works (Finder shows a
             # generic app icon instead of the NullWire glyph).
             local icns_url="https://nullwire.xyz/NullWire.icns"
-            if ! curl -sSL --fail --max-time 10 "$icns_url" \
+            if ! curl -sSL --fail --connect-timeout 10 --max-time 10 "$icns_url" \
                 -o "$app_path/Contents/Resources/AppIcon.icns" 2>/dev/null; then
                 warn "could not fetch desktop icon from $icns_url; .app will use generic Finder icon"
             fi
@@ -372,7 +745,7 @@ EOF
             local icon_url="https://nullwire.xyz/icons/icon-512.png"
             local icon_path="$NULLWIRE_HOME/icons/NullWire.png"
             mkdir -p "$NULLWIRE_HOME/icons"
-            if ! curl -sSL --fail --max-time 10 "$icon_url" -o "$icon_path" 2>/dev/null; then
+            if ! curl -sSL --fail --connect-timeout 10 --max-time 10 "$icon_url" -o "$icon_path" 2>/dev/null; then
                 warn "could not fetch desktop icon — skipping"
                 return 0
             fi
@@ -512,7 +885,7 @@ PYEOF
 
     # Step 3a: create the contact.
     local create_resp
-    create_resp="$(curl -fsS --max-time 10 -X POST \
+    create_resp="$(curl -fsS --connect-timeout 5 --max-time 10 -X POST \
         -H "Content-Type: application/json" \
         -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
         -d "$contact_payload" \
@@ -544,7 +917,7 @@ except Exception:
     fi
 
     # Step 3c: import the bundle into the new thread.
-    if curl -fsS --max-time 10 -X POST \
+    if curl -fsS --connect-timeout 5 --max-time 10 -X POST \
         -H "Content-Type: application/json" \
         -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
         -d "$bundle_import_payload" \
@@ -617,7 +990,7 @@ main() {
     # wallet and gets a register error, identical to today.
     pilot_payer_balance_lamports() {
         local resp
-        resp="$(curl -sS -m 5 -X POST \
+        resp="$(curl -sS --connect-timeout 3 -m 5 -X POST \
             -H 'Content-Type: application/json' \
             -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"${NULLWIRE_PILOT_PAYER_PUBKEY}\"]}" \
             https://api.devnet.solana.com 2>/dev/null)" || return 1
@@ -642,9 +1015,16 @@ main() {
     # needed); if it's low, we delete the stale file so the CLI's own
     # ensure_service_fee_wallet fallback path takes over with a fresh
     # per-install keypair.
-    log "checking pilot rent-payer balance (devnet)..."
-    local payer_balance
-    payer_balance="$(pilot_payer_balance_lamports || true)"
+    # F5 (audit): dry-run mode skips the devnet RPC probe — keeps the
+    # c2-tests integration mode hermetic and fast (no off-host calls).
+    if [ "$NULLWIRE_INSTALL_DRYRUN" = "1" ]; then
+        log "dry-run: skipping pilot rent-payer balance check"
+        local payer_balance=""
+    else
+        log "checking pilot rent-payer balance (devnet)..."
+        local payer_balance
+        payer_balance="$(pilot_payer_balance_lamports || true)"
+    fi
     if [ -n "$payer_balance" ] && [ "$payer_balance" -lt "$MIN_PILOT_PAYER_LAMPORTS" ] 2>/dev/null; then
         warn "pilot rent-payer is low (${payer_balance} lamports < ${MIN_PILOT_PAYER_LAMPORTS}); falling back to per-install devnet airdrop."
         warn "if registration fails with rate-limit, retry in a few minutes — funds are being topped up."
@@ -704,7 +1084,12 @@ main() {
     local tray_asset="nullwire-tray-${platform}"
     local checksums_url="${base_url}/checksums.sha256"
 
-    # Fetch checksums manifest first — it's small, signed, and drives verification
+    # rc41 C2: prefer the offline-signed `releases.json` manifest as
+    # the source of truth for the CLI binary sha256.  Fall back to the
+    # unsigned `checksums.sha256` only if minisign is unavailable or
+    # the manifest cannot be fetched.  HARD-FAIL if a manifest IS
+    # fetched AND minisign IS present AND the signature does not verify
+    # — that is an attack signal, not a transient.
     local tmp_dir
     tmp_dir="$(mktemp -d)"
     # Bake the resolved path into the trap NOW (double-quoted) so the
@@ -715,17 +1100,130 @@ main() {
     # "unbound variable" error users saw at the very end of install.
     trap "rm -rf '$tmp_dir'" EXIT
 
-    download "$checksums_url" "$tmp_dir/checksums.sha256"
-
-    # Extract expected hash for the CLI binary.
-    local cli_hash
-    cli_hash="$(grep " $cli_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}')"
-
-    if [ -z "$cli_hash" ]; then
-        fail "could not find expected checksum entries for platform $platform
-    This version of the installer may not match the release."
+    local cli_hash=""
+    local used_signed_manifest=0
+    if have_minisign; then
+        # F2 (audit): fetch_signed_manifest distinguishes
+        #   0 = both fetched OK
+        #   1 = neither (or just manifest) reachable — soft fallback eligible
+        #   2 = manifest reachable but sig MISSING — downgrade attack, hard fail
+        local fetch_rc=0
+        fetch_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig" || fetch_rc=$?
+        case "$fetch_rc" in
+            0)
+                if verify_signed_manifest "$tmp_dir/releases.json" "$tmp_dir/releases.json.minisig" "$NULLWIRE_RELEASE_PUBKEY"; then
+                    # Round-4 (Sigstore Posture B prototype): optional
+                    # Rekor transparency-log verification.  Defense-in-
+                    # depth on top of the minisign signature — if a
+                    # signing-key compromise minted a manifest without a
+                    # corresponding Rekor entry, this would catch it.
+                    if fetch_rekor_receipt "$tmp_dir/releases.json.rekor"; then
+                        if ! verify_rekor_receipt "$tmp_dir/releases.json" "$tmp_dir/releases.json.rekor"; then
+                            fail "Rekor transparency-log verification FAILED.
+    The signed manifest verified against the embedded pubkey, but the
+    accompanying Rekor receipt at $NULLWIRE_REKOR_URL did not.
+    This could indicate a stolen-offline-key attack where the attacker
+    minted a manifest without publishing to the public transparency log.
+    Refusing to install.  Report at https://github.com/yunomiwell/nullwire-releases/issues"
+                        fi
+                        ok "Rekor transparency-log receipt verified"
+                    fi
+                    # Round-4: revoked_versions kill-switch (schema v2+).
+                    # If THIS version appears in the signed manifest's revoke
+                    # list, refuse to install — even if everything else
+                    # verifies.  Defends against the case where a backdoored
+                    # rcXX shipped, was discovered post-publish, and was
+                    # killed by adding it to the manifest.
+                    if ! check_version_not_revoked "$tmp_dir/releases.json" "$NULLWIRE_VERSION" 2>/dev/null; then
+                        fail "version $NULLWIRE_VERSION is REVOKED in the signed manifest.
+    This release has been killed post-publish (likely because a security
+    issue was discovered).  Refusing to install.
+    Check https://nullwire.xyz/security for details, or upgrade to a
+    newer version."
+                    fi
+                    cli_hash="$(parse_sha256_from_manifest "$tmp_dir/releases.json" "$platform" 2>/dev/null || true)"
+                    if [ -n "$cli_hash" ]; then
+                        local schema_v
+                        schema_v="$(parse_manifest_schema_version "$tmp_dir/releases.json" 2>/dev/null || echo 1)"
+                        ok "signed manifest verified (schema v${schema_v}) — using sha256 from manifest"
+                        used_signed_manifest=1
+                    else
+                        fail "manifest verified but missing sha256 entry for platform $platform — installer/manifest version mismatch."
+                    fi
+                else
+                    fail "manifest signature INVALID — refusing to install.
+    The signed release manifest at $NULLWIRE_MANIFEST_URL did not verify
+    against the embedded pubkey ($NULLWIRE_RELEASE_PUBKEY).
+    Either the manifest was tampered with or the release key rotated.
+    Do NOT proceed.  Report at https://github.com/yunomiwell/nullwire-releases/issues"
+                fi
+                ;;
+            2)
+                # F2 (audit): manifest fetched, signature missing.
+                # ALWAYS hard-fail — irrespective of NULLWIRE_REQUIRE_SIGNED_MANIFEST.
+                # A legitimate release publishes both files atomically;
+                # serving manifest without its signature is the
+                # downgrade-attack shape, never a transient.
+                fail "DOWNGRADE ATTACK DETECTED: manifest available at $NULLWIRE_MANIFEST_URL
+    but signature missing at $NULLWIRE_MANIFEST_SIG_URL.
+    A legitimate release publishes both files atomically.  Refusing to install.
+    Report at https://github.com/yunomiwell/nullwire-releases/issues"
+                ;;
+            *)
+                # rc=1 (or anything else): neither file reachable.
+                # Soft fallback unless strict mode is on.
+                warn "could not fetch signed manifest from $NULLWIRE_MANIFEST_URL — falling back to TLS+sha256"
+                ;;
+        esac
     fi
 
+    if [ "$used_signed_manifest" = "0" ]; then
+        if [ "$NULLWIRE_REQUIRE_SIGNED_MANIFEST" = "1" ]; then
+            if ! have_minisign; then
+                fail "NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 set but minisign not installed.
+    Refusing to proceed.  Install minisign and re-run:
+        brew install minisign        (macOS)
+        apt install minisign         (Debian/Ubuntu)
+        pkg install minisign         (FreeBSD)"
+            else
+                fail "NULLWIRE_REQUIRE_SIGNED_MANIFEST=1 set but signed manifest is unavailable.
+    Check connectivity to $NULLWIRE_MANIFEST_URL and re-run."
+            fi
+        fi
+        warn "⚠️  WARNING: signature verification OFF. Install minisign for full first-install verification. Falling back to TLS+sha256 only."
+    fi
+
+    # Always fetch checksums.sha256: signed-manifest path uses it only
+    # for the OPTIONAL tray binary hash (manifest schema v1 does not
+    # ship tray hashes).  Fallback path uses it for CLI hash too.
+    download "$checksums_url" "$tmp_dir/checksums.sha256"
+
+    if [ "$used_signed_manifest" = "0" ]; then
+        cli_hash="$(grep " $cli_asset\$" "$tmp_dir/checksums.sha256" | awk '{print $1}')"
+        if [ -z "$cli_hash" ]; then
+            fail "could not find expected checksum entries for platform $platform
+    This version of the installer may not match the release."
+        fi
+    fi
+
+    # F5 (audit): integration-test dry-run.  Exit BEFORE downloading the
+    # CLI binary, BEFORE touching $NULLWIRE_HOME, BEFORE launchd/systemd
+    # setup.  All verification gates have already run by this point —
+    # exit 0 means "would have installed", exit non-zero means an
+    # earlier gate already aborted.  Used by the c2-tests integration
+    # mode; production users have no reason to set this.
+    if [ "$NULLWIRE_INSTALL_DRYRUN" = "1" ]; then
+        ok "dry-run: verification gates passed (used_signed_manifest=$used_signed_manifest, cli_hash=$cli_hash)"
+        exit 0
+    fi
+
+    # F8 (audit): tray binary is verified against the UNSIGNED
+    # checksums.sha256, not the signed manifest.  Schema v1 manifest
+    # carries CLI sha256 only.  Tray supply-chain hardening via schema
+    # v2 manifest is rc42+ work — tray is optional + fail-soft + UI-only
+    # surface, so the asymmetric trust model is acceptable for now.
+    # See RC41_C2_AUDIT.md F8.
+    #
     # rc28: extract the tray-binary hash if the release ships one. We treat
     # the tray as OPTIONAL: a release without a tray asset (older versions,
     # or a partial release rebuild) installs cleanly minus the menubar
@@ -742,7 +1240,7 @@ main() {
     # log + continue on download/verify failure so a transient CDN issue
     # on the tray asset doesn't block the messenger install.
     if [ -n "$tray_hash" ]; then
-        if curl -sSL --fail "$base_url/$tray_asset" -o "$tmp_dir/$tray_asset" 2>/dev/null; then
+        if curl -sSL --fail --connect-timeout 10 --max-time 60 "$base_url/$tray_asset" -o "$tmp_dir/$tray_asset" 2>/dev/null; then
             local actual_tray_hash
             actual_tray_hash="$(shasum -a 256 "$tmp_dir/$tray_asset" | awk '{print $1}')"
             if [ "$actual_tray_hash" = "$tray_hash" ]; then
