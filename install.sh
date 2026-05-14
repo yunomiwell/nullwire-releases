@@ -1627,6 +1627,57 @@ EOF
         done
         IFS="$_NW_OLDIFS"
         unset _NW_OLDIFS _nw_h
+
+        # rc48-followup (2026-05-14): self-heal for the install-time
+        # auto-add silent-failure mode.  `add_contact_from_chain`
+        # creates the contact entry via POST /api/contacts (always
+        # succeeds), then POSTs to /api/threads/<id>/import-peer-bundle
+        # to attach the bundle.  The import POST sometimes silently
+        # 4xx/5xx during the install-time window — observed twice with
+        # joe-rogan + martin-test on Mac B 2026-05-14.  The contact ends
+        # up registered but without its peer-bundle file on disk; the
+        # next `Send` fails with "missing peer bundle" — bad first
+        # impression for a fresh install.
+        #
+        # The daemon's /api/contacts/<id>/refresh-bundle-from-chain
+        # endpoint (rc48 SSRF fix) reliably recovers the bundle from
+        # the on-chain registry + CDN.  Loop the NULLWIRE_ADD list one
+        # more time: for any handle whose bundle file is still missing,
+        # call refresh-from-chain as a heal step.  Best-effort, non-
+        # fatal — a final warn surfaces if both paths failed.
+        local _auth_token=""
+        if [ -f "$NULLWIRE_HOME/state/api-auth-token" ]; then
+            _auth_token="$(cat "$NULLWIRE_HOME/state/api-auth-token" 2>/dev/null || true)"
+        fi
+        _NW_OLDIFS="$IFS"
+        IFS=','
+        for _nw_h in $NULLWIRE_ADD; do
+            _nw_h="$(printf '%s' "$_nw_h" | tr -d '[:space:]')"
+            _nw_h="${_nw_h#@}"
+            if [ -z "$_nw_h" ]; then
+                continue
+            fi
+            _bundle_path="$NULLWIRE_HOME/state/peer-bundles/${_nw_h}.json"
+            if [ -f "$_bundle_path" ]; then
+                continue
+            fi
+            log "auto-add @${_nw_h}: peer-bundle file missing; attempting refresh-from-chain heal..."
+            if [ -z "$_auth_token" ]; then
+                warn "auto-add @${_nw_h}: no api-auth-token; cannot heal automatically. Open the UI → contact menu → Refresh bundle."
+                continue
+            fi
+            if curl -fsS --connect-timeout 5 --max-time 15 -X POST \
+                -H "X-Nullwire-Auth-Token: $_auth_token" \
+                -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
+                "http://127.0.0.1:${NULLWIRE_PORT}/api/contacts/${_nw_h}/refresh-bundle-from-chain" \
+                >/dev/null 2>&1; then
+                ok "auto-add @${_nw_h}: bundle recovered via refresh-from-chain"
+            else
+                warn "auto-add @${_nw_h}: refresh-from-chain also failed. Open the UI's contact menu → Refresh bundle, OR ssh and retry the curl manually."
+            fi
+        done
+        IFS="$_NW_OLDIFS"
+        unset _NW_OLDIFS _nw_h _auth_token _bundle_path
     fi
 
     # Open browser.
