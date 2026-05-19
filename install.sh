@@ -124,7 +124,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc50}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc49}"
 readonly NULLWIRE_RELEASES_BASE="${NULLWIRE_RELEASES_BASE:-https://github.com/yunomiwell/nullwire-releases/releases/download}"
 
 # C2 (red-team rc37): the cold-install path used to trust the UNSIGNED
