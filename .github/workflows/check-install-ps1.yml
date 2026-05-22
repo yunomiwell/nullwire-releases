@@ -1,0 +1,65 @@
+# Static verification of install.ps1 (the Windows PowerShell installer).
+#
+# install.ps1 is authored on macOS where no Windows PowerShell engine is
+# available, so it cannot be parse-checked locally.  This workflow is its
+# verification gate: it parses the script with the real Windows PowerShell
+# 5.1 engine (the engine `irm install.ps1 | iex` runs under) and lints it
+# with PSScriptAnalyzer.
+#
+# This is a STATIC check only — it does not execute the installer (that
+# needs a real release carrying the windows-x86_64 .exe + a human run).
+name: check-install-ps1
+
+on:
+  push:
+    paths:
+      - install.ps1
+      - .github/workflows/check-install-ps1.yml
+  pull_request:
+    paths:
+      - install.ps1
+      - .github/workflows/check-install-ps1.yml
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.2.2
+
+      - name: Parse install.ps1 with the Windows PowerShell 5.1 engine
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1).Path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            foreach ($e in $errors) {
+              Write-Host "PARSE ERROR (line $($e.Extent.StartLineNumber)): $($e.Message)"
+            }
+            exit 1
+          }
+          Write-Host "install.ps1 parses cleanly under PowerShell $($PSVersionTable.PSVersion)"
+
+      - name: Lint install.ps1 with PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          # PSAvoidUsingWriteHost is excluded: an installer's colored
+          # user-facing output is intentionally Write-Host (install.sh
+          # uses printf for the same reason).
+          $results = Invoke-ScriptAnalyzer -Path ./install.ps1 -ExcludeRule PSAvoidUsingWriteHost
+          if ($results) {
+            $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          }
+          $errs = @($results | Where-Object { $_.Severity -in @('Error', 'ParseError') })
+          if ($errs.Count -gt 0) {
+            Write-Host "PSScriptAnalyzer: $($errs.Count) error-severity finding(s) — failing."
+            exit 1
+          }
+          Write-Host "PSScriptAnalyzer: no error-severity findings ($(@($results).Count) advisory warning/info)."

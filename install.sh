@@ -124,7 +124,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc50}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc51}"
 readonly NULLWIRE_RELEASES_BASE="${NULLWIRE_RELEASES_BASE:-https://github.com/yunomiwell/nullwire-releases/releases/download}"
 
 # C2 (red-team rc37): the cold-install path used to trust the UNSIGNED
@@ -1601,7 +1601,7 @@ EOF
     if curl -fsSL -X POST "http://127.0.0.1:${NULLWIRE_PORT}/api/send" \
         -H "Content-Type: application/json" \
         -H "Origin: http://127.0.0.1:${NULLWIRE_PORT}" \
-        -d "{\"threadId\":\"welcome\",\"text\":\"hi\"}" \
+        -d "{\"threadId\":\"welcome-bot\",\"text\":\"hi\"}" \
         >/dev/null 2>&1; then
         ok "welcome message sent — check the UI for the bot's reply (~10-30s mesh round-trip)"
     else
