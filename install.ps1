@@ -517,7 +517,7 @@ function Add-ContactFromChain($handle) {
             -Body $importBody -TimeoutSec 10 | Out-Null
         Ok "auto-added @$handle as a contact (post-quantum bundle imported from chain)"
     } catch {
-        Warn "@$handle: auto-add failed ($($_.Exception.Message)) - open the UI's Add Contact menu and use Advanced -> paste bundle."
+        Warn "@${handle}: auto-add failed ($($_.Exception.Message)) - open the UI's Add Contact menu and use Advanced -> paste bundle."
     }
 }
 
