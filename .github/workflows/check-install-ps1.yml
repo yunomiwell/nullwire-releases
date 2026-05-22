@@ -6,7 +6,7 @@
 # 5.1 engine (the engine `irm install.ps1 | iex` runs under) and lints it
 # with PSScriptAnalyzer.
 #
-# This is a STATIC check only — it does not execute the installer (that
+# This is a STATIC check only - it does not execute the installer (that
 # needs a real release carrying the windows-x86_64 .exe + a human run).
 name: check-install-ps1
 
@@ -59,7 +59,7 @@ jobs:
           }
           $errs = @($results | Where-Object { $_.Severity -in @('Error', 'ParseError') })
           if ($errs.Count -gt 0) {
-            Write-Host "PSScriptAnalyzer: $($errs.Count) error-severity finding(s) — failing."
+            Write-Host "PSScriptAnalyzer: $($errs.Count) error-severity finding(s) - failing."
             exit 1
           }
           Write-Host "PSScriptAnalyzer: no error-severity findings ($(@($results).Count) advisory warning/info)."
