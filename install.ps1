@@ -81,7 +81,7 @@ Set-StrictMode -Version 1.0
 # NULLWIRE_VERSION MUST match the release tag that carries the
 # nullwire-cli-windows-x86_64 asset.  Bumped in lockstep with install.sh
 # at every release cut.  The Windows binary debuts in v0.1.3-rc51.
-$NullwireVersion = if ($env:NULLWIRE_VERSION) { $env:NULLWIRE_VERSION } else { 'v0.1.3-rc51' }
+$NullwireVersion = if ($env:NULLWIRE_VERSION) { $env:NULLWIRE_VERSION } else { 'v0.1.3-rc52' }
 
 $NullwireReleasesBase = if ($env:NULLWIRE_RELEASES_BASE) { $env:NULLWIRE_RELEASES_BASE } `
     else { 'https://github.com/yunomiwell/nullwire-releases/releases/download' }

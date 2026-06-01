@@ -124,7 +124,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — kept at top so it's easy to audit
 # ─────────────────────────────────────────────────────────────────
-readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc51}"
+readonly NULLWIRE_VERSION="${NULLWIRE_VERSION:-v0.1.3-rc52}"
 readonly NULLWIRE_RELEASES_BASE="${NULLWIRE_RELEASES_BASE:-https://github.com/yunomiwell/nullwire-releases/releases/download}"
 
 # C2 (red-team rc37): the cold-install path used to trust the UNSIGNED
@@ -1190,7 +1190,18 @@ main() {
     Check connectivity to $NULLWIRE_MANIFEST_URL and re-run."
             fi
         fi
-        warn "⚠️  WARNING: signature verification OFF. Install minisign for full first-install verification. Falling back to TLS+sha256 only."
+        warn "⚠️  signature verification OFF — falling back to TLS+sha256."
+        warn "    Residual trust (honest): this binary's integrity now rests"
+        warn "    ONLY on TLS to the GitHub releases host. A compromise of the"
+        warn "    releases account could serve a tampered binary + matching"
+        warn "    checksums and this path would not catch it. The offline"
+        warn "    minisign signature is what closes that gap."
+        warn "    Close it now:   brew install minisign   (or apt install minisign)"
+        warn "    then re-run this installer — it auto-uses the signed manifest."
+        warn "    Or verify after install: compare"
+        warn "      shasum -a 256 ~/.nullwire/bin/nullwire-cli"
+        warn "    against the signed manifest at https://nullwire.xyz/releases.json"
+        warn "    (verify https://nullwire.xyz/releases.json.minisig with minisign)."
     fi
 
     # Always fetch checksums.sha256: signed-manifest path uses it only
